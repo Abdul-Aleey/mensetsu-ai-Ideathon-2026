@@ -104,6 +104,29 @@ a {
     transition: none !important;
     animation: none !important;
   }
+
+  /* Loading spinners communicate active/in-progress status, not decorative
+     motion — the blanket disable above silently turned them into a plain
+     unmoving ring, which reads as a frozen/broken page rather than "this
+     is working" (reported live on the report-generation screen: "looks
+     like a static page"). A continuous rotation can still be uncomfortable
+     for reduced-motion users, so this swaps it for a gentler opacity pulse
+     instead of ignoring the preference outright. */
+  .setup-loading__spinner,
+  .complete-screen__loading-spinner:not(.complete-screen__loading-spinner--stopped),
+  .landing__cta-spinner {
+    animation: setup-loading-pulse 1.6s ease-in-out infinite !important;
+  }
+}
+
+@keyframes setup-loading-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .field-error {
