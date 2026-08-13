@@ -9,3 +9,4 @@ backend/mensetsu.db
 .env
 generated_pdfs/
 MEMORY.md
+miscellaneous/
