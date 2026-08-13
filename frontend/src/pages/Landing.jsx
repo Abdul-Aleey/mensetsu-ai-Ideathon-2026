@@ -56,7 +56,7 @@ export default function Landing() {
           </span>
 
           <h1 className="landing__headline">
-            AI makes every resume read the same now.
+            AI makes every resume look the same now.
             <br />
             <span className="landing__headline-accent">Find out who's actually right for the role.</span>
           </h1>
