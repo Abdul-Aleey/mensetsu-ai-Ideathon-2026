@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="{{ language }}">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: A4;
+    margin: 2.2cm 1.8cm;
+    @bottom-center {
+      content: "Mensetsu — practice session report, page " counter(page) " of " counter(pages);
+      font-size: 8pt;
+      color: #8a8fa8;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: "Noto Sans JP", "Noto Sans CJK JP", "Helvetica Neue", Arial, sans-serif;
+    color: #1a1a2e;
+    font-size: 10.5pt;
+    line-height: 1.55;
+  }
+
+  h1, h2, h3 { font-family: inherit; margin: 0; }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 3px solid #1c2454;
+    padding-bottom: 0.9em;
+    margin-bottom: 1.4em;
+  }
+
+  .header__role { font-size: 20pt; font-weight: 700; color: #1c2454; margin-bottom: 0.15em; }
+  .header__meta { font-size: 9pt; color: #5a5f7a; }
+  .header__meta div { margin-bottom: 0.15em; }
+
+  .badge {
+    display: inline-block;
+    padding: 0.45em 1em;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 10pt;
+    color: #fff;
+    background: #3d4ea8;
+    white-space: nowrap;
+  }
+
+  section { margin-bottom: 1.6em; }
+
+  .section-title {
+    font-size: 12.5pt;
+    font-weight: 700;
+    color: #1c2454;
+    margin-bottom: 0.6em;
+    padding-bottom: 0.25em;
+    border-bottom: 1px solid #dfe1ee;
+  }
+
+  .summary { font-size: 11pt; }
+
+  .two-col { display: flex; gap: 1.4em; }
+  .two-col > div { flex: 1; }
+  .two-col h3 { font-size: 10.5pt; margin-bottom: 0.5em; }
+  .two-col ul { margin: 0; padding-left: 1.1em; }
+  .two-col li { margin-bottom: 0.4em; }
+  .strengths h3 { color: #1e7a4c; }
+  .improve h3 { color: #b7791f; }
+
+  .item { margin-bottom: 1.2em; page-break-inside: avoid; }
+  .item__competency {
+    font-size: 8pt;
+    color: #5a5f7a;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.2em;
+  }
+  .item__question { font-weight: 700; color: #1c2454; margin-bottom: 0.5em; }
+  .item__row { margin-bottom: 0.4em; }
+  .item__label { font-weight: 700; font-size: 9pt; }
+  .item__label--good { color: #1e7a4c; }
+  .item__label--improve { color: #b7791f; }
+  .item__star {
+    margin-top: 0.3em;
+    font-size: 9.5pt;
+    color: #33364a;
+    border-left: 3px solid #dfe1ee;
+    padding-left: 0.6em;
+  }
+  .item__star-label {
+    display: block;
+    font-size: 8pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #5a5f7a;
+    margin-bottom: 0.2em;
+  }
+
+  .recommendations { font-size: 10.5pt; }
+
+  .transcript-turn { margin-bottom: 1em; page-break-inside: avoid; }
+  .transcript-q { font-weight: 700; color: #1c2454; }
+  .transcript-meta { font-size: 8pt; color: #8a8fa8; margin-left: 0.5em; }
+  .transcript-a { margin-top: 0.25em; color: #33364a; }
+
+  .responsible-use {
+    margin-top: 1.6em;
+    font-size: 8pt;
+    color: #8a8fa8;
+    border-top: 1px solid #dfe1ee;
+    padding-top: 0.6em;
+  }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <div class="header__role">{{ role_title or "Role not specified" }}</div>
+      <div class="header__meta">
+        <div>Candidate: {{ candidate_name or "Not identified" }}</div>
+        <div>Date: {{ date }}</div>
+        <div>Interview language: {{ language_label }}</div>
+      </div>
+    </div>
+    <span class="badge">Practice session</span>
+  </div>
+
+  <section>
+    <div class="section-title">Overall summary</div>
+    <p class="summary">{{ overall_summary }}</p>
+  </section>
+
+  <section class="two-col">
+    <div class="strengths">
+      <h3>Strengths</h3>
+      <ul>{% for s in strengths %}<li>{{ s }}</li>{% endfor %}</ul>
+    </div>
+    <div class="improve">
+      <h3>Areas to improve</h3>
+      <ul>{% for a in areas_to_improve %}<li>{{ a }}</li>{% endfor %}</ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title">Question-by-question feedback</div>
+    {% for item in items %}
+    <div class="item">
+      <div class="item__competency">{{ item.competency }}</div>
+      <div class="item__question">{{ item.question_asked }}</div>
+      <div class="item__row"><span class="item__label item__label--good">What went well:</span> {{ item.what_went_well }}</div>
+      <div class="item__row"><span class="item__label item__label--improve">What to improve:</span> {{ item.what_to_improve }}</div>
+      <div class="item__star">
+        <span class="item__star-label">{{ item.example_framework or "Example answer" }}</span>
+        {{ item.example_answer }}
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+
+  <section>
+    <div class="section-title">Recommendations for next time</div>
+    <p class="recommendations">{{ practice_recommendations }}</p>
+  </section>
+
+  <section style="page-break-before: always;">
+    <div class="section-title">Full transcript</div>
+    {% for turn in transcript %}
+    <div class="transcript-turn">
+      <div class="transcript-q">Q{{ turn.index + 1 }}. {{ turn.question }}<span class="transcript-meta">{{ turn.competency or "" }}</span></div>
+      <div class="transcript-a">{{ turn.answer or "(no answer recorded)" }}</div>
+    </div>
+    {% endfor %}
+  </section>
+
+  <div class="responsible-use">
+    This practice report is a coaching tool to help you prepare — treat it as guidance, not a guarantee of how any real interview will go.
+  </div>
+
+</body>
+</html>

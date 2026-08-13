@@ -1,0 +1,10 @@
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+backend/mensetsu.db
+backend/static
+frontend/dist
+sample
+.git
+.claude

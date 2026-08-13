@@ -1,0 +1,639 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { useNavigate, useParams } from "react-router-dom";
+import { MockAvatarController } from "../avatar/MockAvatarController.js";
+import { PerxonaAvatarController } from "../avatar/PerxonaAvatarController.js";
+import CameraPanel from "../components/CameraPanel.jsx";
+
+const EMOTION_LABEL = {
+  encouraging: "🙂 encouraging",
+  probing: "🤔 probing",
+  approving: "😊 approving",
+  neutral: "😐 neutral",
+};
+
+// Mirrors the persona registry in backend/app/interviewers.py — just the
+// display names, which is all the chat panel / slot labels need.
+const INTERVIEWER_NAMES = { alex: "Alex", sara: "Sara" };
+
+export default function Interview() {
+  const { sessionId } = useParams();
+  const navigate = useNavigate();
+
+  const [session, setSession] = useState(null);
+  const [question, setQuestion] = useState(null);
+  const [emotion, setEmotion] = useState("neutral");
+  // Which interviewer is speaking the current turn — "alex" | "sara". In a
+  // two-interviewer session the other one just sits idle until their turn.
+  const [currentSpeaker, setCurrentSpeaker] = useState("alex");
+  const currentSpeakerRef = useRef("alex"); // mirrors currentSpeaker for callbacks that need a fresh read, not a stale closure
+  // "question" (normal answer form) | "feedback_item" (Continue button, practice
+  // mode's per-competency STAR coaching) | "feedback_qna" (normal answer form,
+  // asking if the candidate has questions about the feedback).
+  const [turnKind, setTurnKind] = useState("question");
+  const [questionsAsked, setQuestionsAsked] = useState(0);
+  const [speaking, setSpeaking] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [thinking, setThinking] = useState(false);
+  const [answerDraft, setAnswerDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [avatarMode, setAvatarMode] = useState("mock"); // overridden from /api/config once loaded
+  const [geminiConnected, setGeminiConnected] = useState(false);
+  const [perxonaConnectedMap, setPerxonaConnectedMap] = useState({}); // interviewer id -> connected
+  const [transcript, setTranscript] = useState([]); // running {speaker, text}[] for the live chat panel
+  const [begun, setBegun] = useState(false); // gates the whole flow behind a real user click
+  const [connecting, setConnecting] = useState(false);
+
+  // Up to two controller instances, keyed by interviewer id ("alex" | "sara").
+  const controllersRef = useRef({});
+  // Perxona needs one <sv-presenter> mount point per interviewer — populated
+  // via callback refs in the JSX below rather than useRef-per-id, since the
+  // set of ids is dynamic (1 or 2, from session.interviewers).
+  const perxonaContainerNodesRef = useRef({});
+  const startedRef = useRef(false);
+  const transcriptEndRef = useRef(null);
+  // Holds the latest continueWithoutAnswer closure so speakAndListen can
+  // trigger auto-advance without a circular useCallback dependency
+  // (continueWithoutAnswer itself depends on speakAndListen). Used both for
+  // practice-mode feedback beats and the two-interviewer intro hand-off.
+  const continueWithoutAnswerRef = useRef(null);
+  const pendingResumeRef = useRef(null);
+  const setupPromiseRef = useRef(null);
+  const avatarPanelRef = useRef(null);
+  const [columnHeight, setColumnHeight] = useState(null);
+
+  // Measures the avatar panel's actual rendered height (it's sized by
+  // aspect-ratio off its own width, so it has no fixed pixel value) and
+  // applies it directly to the camera+chat column. A CSS-only stretch
+  // (height: 100% on a grid item whose row height comes from a sibling's
+  // aspect-ratio) doesn't reliably resolve across browsers — when it
+  // didn't, the chat panel had no height bound at all and just grew with
+  // every new message instead of scrolling internally within a fixed box.
+  useEffect(() => {
+    if (!avatarPanelRef.current) return undefined;
+    const el = avatarPanelRef.current;
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height;
+      if (height) setColumnHeight(height);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [transcript]);
+
+  const pushTranscript = useCallback((speaker, text) => {
+    if (!text) return;
+    setTranscript((t) => [...t, { speaker, text }]);
+  }, []);
+
+  // Waiting for the full speak() to resolve before showing the chat bubble
+  // (the previous behavior) made the chat panel visibly lag behind the
+  // avatar on anything longer than a short line — reported live as the chat
+  // text taking "too much time to appear". Pushing it the instant speak()
+  // is called would show it before the avatar has said anything at all, so
+  // instead: push shortly after the avatar starts talking (a fixed delay,
+  // not tied to the SDK's own start-of-speech event — confirmed unreliably
+  // slow, up to ~10s, in PerxonaAvatarController's history), or the moment
+  // it actually finishes if that happens first (e.g. a very short line).
+  const EARLY_TRANSCRIPT_DELAY_MS = 900;
+  const speakAndPushTranscript = useCallback(
+    async (controller, speaker, text, emo) => {
+      let pushed = false;
+      const pushOnce = () => {
+        if (pushed) return;
+        pushed = true;
+        pushTranscript(speaker, text);
+      };
+      const timer = setTimeout(pushOnce, EARLY_TRANSCRIPT_DELAY_MS);
+      await controller.speak(text, emo);
+      clearTimeout(timer);
+      pushOnce();
+    },
+    [pushTranscript]
+  );
+
+  const [micUnsupported, setMicUnsupported] = useState(false);
+
+  const speakAndListen = useCallback(
+    async (text, emo, kind = "question", speaker = "alex") => {
+      setCurrentSpeaker(speaker);
+      currentSpeakerRef.current = speaker;
+      setQuestion(text);
+      setEmotion(emo);
+      setTurnKind(kind);
+      setSpeaking(true);
+      await speakAndPushTranscript(controllersRef.current[speaker], speaker, text, emo);
+      setSpeaking(false);
+      if (kind === "feedback_item" || kind === "handoff") {
+        // Nothing for the candidate to say — either a practice-mode coaching
+        // beat, or (kind === "handoff") the first interviewer in a
+        // two-interviewer session passing things to the second one. Move
+        // straight to the next turn the moment the current interviewer
+        // finishes speaking, instead of listening for a reply that was
+        // never coming.
+        continueWithoutAnswerRef.current?.();
+        return;
+      }
+      const ok = await controllersRef.current[speaker].startListening();
+      setListening(ok);
+      setMicUnsupported(!ok);
+    },
+    [speakAndPushTranscript]
+  );
+
+  // Explicit, clickable mic control — the automatic "start listening after
+  // speaking" above gave no obvious, reliable affordance that the mic was
+  // ever active (a small overlay badge on the avatar video is easy to miss
+  // entirely, or to catch only for the brief moment before something ends
+  // it), so this lets the candidate directly see and control mic state
+  // rather than relying on it happening silently in the background.
+  const toggleMic = useCallback(async () => {
+    const controller = controllersRef.current[currentSpeakerRef.current];
+    if (!controller) return;
+    if (listening) {
+      controller.stopListening();
+      setListening(false);
+      return;
+    }
+    const ok = await controller.startListening();
+    setListening(ok);
+    setMicUnsupported(!ok);
+  }, [listening]);
+
+  const submitAnswer = useCallback(
+    async (text) => {
+      if (!text.trim() || submitting) return;
+      setSubmitting(true);
+      setError(null);
+      const speakerNow = currentSpeakerRef.current;
+      controllersRef.current[speakerNow].stopListening();
+      setListening(false);
+      setAnswerDraft("");
+      pushTranscript("candidate", text);
+      // Gemini generating the next question is real, visible latency — previously
+      // the avatar just stood there frozen for however long that took. Perxona's
+      // own "thinking" animation fills that dead spot instead of our own state.
+      controllersRef.current[speakerNow].setThinking(true);
+      setThinking(true);
+
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/answer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ answer: text }),
+        });
+        if (!res.ok) throw new Error("Something went wrong. Please try answering again.");
+        const data = await res.json();
+        controllersRef.current[speakerNow].setThinking(false);
+        setThinking(false);
+        setQuestionsAsked(data.questions_asked);
+
+        if (data.status === "complete") {
+          // Speak the closing remarks before leaving, so the candidate
+          // actually hears the interview end rather than being cut off.
+          if (data.closing_message) {
+            const closer = data.speaker || speakerNow;
+            setCurrentSpeaker(closer);
+            currentSpeakerRef.current = closer;
+            setQuestion(data.closing_message);
+            setEmotion(data.emotion || "neutral");
+            setSpeaking(true);
+            await speakAndPushTranscript(controllersRef.current[closer], closer, data.closing_message, data.emotion || "neutral");
+            setSpeaking(false);
+          }
+          navigate(`/complete/${sessionId}`);
+          return;
+        }
+        await speakAndListen(data.question, data.emotion, data.turn_kind, data.speaker);
+      } catch (err) {
+        controllersRef.current[speakerNow].setThinking(false);
+        setThinking(false);
+        setError(err.message);
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [sessionId, submitting, navigate, speakAndListen, speakAndPushTranscript]
+  );
+
+  // Two cases where there's nothing for the candidate to answer, so this
+  // fires automatically (via continueWithoutAnswerRef, see speakAndListen)
+  // right after the current interviewer finishes speaking, rather than
+  // waiting on a click: practice mode's feedback items, and the first
+  // interviewer's hand-off line in a two-interviewer session's intro. Posts
+  // an empty answer (recorded but never assessed, since neither of these
+  // turns carries a competency_id) instead of reusing submitAnswer, so
+  // nothing gets pushed into the chat panel as if the candidate "said" it.
+  const continueWithoutAnswer = useCallback(async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    const speakerNow = currentSpeakerRef.current;
+    controllersRef.current[speakerNow].setThinking(true);
+    setThinking(true);
+
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer: "" }),
+      });
+      if (!res.ok) throw new Error("Something went wrong. Please try continuing again.");
+      const data = await res.json();
+      controllersRef.current[speakerNow].setThinking(false);
+      setThinking(false);
+      setQuestionsAsked(data.questions_asked);
+
+      if (data.status === "complete") {
+        if (data.closing_message) {
+          const closer = data.speaker || speakerNow;
+          setCurrentSpeaker(closer);
+          currentSpeakerRef.current = closer;
+          setQuestion(data.closing_message);
+          setEmotion(data.emotion || "neutral");
+          setSpeaking(true);
+          await speakAndPushTranscript(controllersRef.current[closer], closer, data.closing_message, data.emotion || "neutral");
+          setSpeaking(false);
+        }
+        navigate(`/complete/${sessionId}`);
+        return;
+      }
+      await speakAndListen(data.question, data.emotion, data.turn_kind, data.speaker);
+    } catch (err) {
+      controllersRef.current[speakerNow].setThinking(false);
+      setThinking(false);
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [sessionId, submitting, navigate, speakAndListen, speakAndPushTranscript]);
+  continueWithoutAnswerRef.current = continueWithoutAnswer;
+
+  const createController = useCallback(
+    (mode, language, interviewerId) => {
+      if (mode === "perxona") {
+        // No Perxona-specific config passed in here — PerxonaAvatarController
+        // fetches its own target (avatar/scene/voice), keyed by
+        // interviewerId, and Connect bearer token from our backend
+        // (GET /api/config, GET /api/connect-token).
+        const controller = new PerxonaAvatarController({
+          language,
+          container: perxonaContainerNodesRef.current[interviewerId],
+          interviewerId,
+        });
+        controller.onConnectionChange((connected) =>
+          setPerxonaConnectedMap((m) => ({ ...m, [interviewerId]: connected }))
+        );
+        return controller;
+      }
+      // Mock mode never actually talks to Perxona — the status dot should say so.
+      setPerxonaConnectedMap((m) => ({ ...m, [interviewerId]: false }));
+      return new MockAvatarController({ language });
+    },
+    []
+  );
+
+  // Fetch everything needed to build the controller — and, in Perxona mode,
+  // load its script/element — as soon as the page mounts, not gated behind
+  // the "Tap to begin" click. Only the actual audio-unlock call
+  // (resumeAudioPlayback, inside controller.start()) needs to run directly
+  // in the click handler to satisfy the browser's autoplay policy; loading
+  // the presenter script and creating <sv-presenter> ahead of time means
+  // start() has almost nothing left to await once the click fires. Doing
+  // all of this setup inside the click handler (the previous approach) put
+  // several fetches and a CDN script load between the click and
+  // resumeAudioPlayback(), which reproduced consistently as present()
+  // failing with "Audio context is not available" — the browser no longer
+  // considered the unlock call close enough to the gesture.
+  useEffect(() => {
+    let cancelled = false;
+    setupPromiseRef.current = (async () => {
+      const [configRes, statusRes, sessionRes, transcriptRes] = await Promise.all([
+        fetch("/api/config"),
+        fetch("/api/status"),
+        fetch(`/api/sessions/${sessionId}`),
+        fetch(`/api/sessions/${sessionId}/transcript`),
+      ]);
+      if (cancelled) return;
+      if (!sessionRes.ok) {
+        setError("Couldn't load this interview session.");
+        return;
+      }
+      const config = await configRes.json();
+      const status = await statusRes.json().catch(() => ({}));
+      const data = await sessionRes.json();
+      const priorTurns = await transcriptRes.json().catch(() => []);
+      if (cancelled) return;
+      setGeminiConnected(Boolean(status.gemini_connected));
+      // flushSync forces the re-render (and this component's per-interviewer
+      // container ref callbacks below) to actually commit before the
+      // controller-creation loop runs. Without it, a two-interviewer session
+      // silently only builds Alex's controller: this same effect continues
+      // synchronously past setSession() with no await in between, so on the
+      // very first render (before session was ever set) the JSX's session
+      // interviewers fallback is just ["alex"] and only Alex's container
+      // div exists yet — Sara's perxonaContainerNodesRef entry is still
+      // undefined when her controller is constructed a few lines down,
+      // and preload() then throws appending into a null container, caught
+      // silently by the .catch(console.error) below.
+      flushSync(() => setSession(data));
+      const mode = config.avatar_mode || "mock";
+      setAvatarMode(mode);
+
+      // Rehydrate the chat panel from whatever the backend already has —
+      // without this, reloading this page mid-interview showed an empty
+      // "conversation will appear here" panel even though the interview
+      // was already several questions in, since `transcript` is otherwise
+      // only ever built up in memory during this one page load.
+      const interviewers = data.interviewers?.length ? data.interviewers : ["alex"];
+
+      for (const turn of priorTurns) {
+        if (turn.answer != null) {
+          // Completed turn — both sides already happened, safe to show immediately.
+          // Feedback-item "continue" turns are recorded with an empty answer
+          // (nothing was actually said) — skip the candidate bubble for those.
+          pushTranscript(turn.speaker || interviewers[0], turn.question);
+          if (turn.answer !== "") pushTranscript("candidate", turn.answer);
+        } else if (data.phase !== "feedback") {
+          // Still-pending question — don't push it yet. beginInterview()
+          // re-speaks it below, and that speak() call is what pushes it via
+          // onSpeakStart, so it only appears once the avatar actually says it.
+          pendingResumeRef.current = {
+            question: turn.question,
+            emotion: turn.emotion || "neutral",
+            speaker: turn.speaker || interviewers[0],
+          };
+        }
+        // else: reloading mid-feedback-phase. The transcript endpoint doesn't
+        // carry turn_kind (feedback_item vs feedback_qna), so skip this
+        // shortcut and let beginInterview's "fresh" branch re-ask the backend
+        // directly below — advance_interview's null-answer replay already
+        // returns the correct turn_kind for that case.
+      }
+      if (pendingResumeRef.current) {
+        pendingResumeRef.current.questionsAsked = data.questions_asked;
+      }
+
+      // One controller per interviewer in this session — both get created
+      // and (in Perxona mode) preloaded up front, even though only one
+      // speaks at a time; the idle one just sits connected and ready.
+      for (const id of interviewers) {
+        const controller = createController(mode, data.language, id);
+        controller.onUserAnswer((text) => submitAnswer(text));
+        controllersRef.current[id] = controller;
+      }
+      if (mode === "perxona") {
+        Object.values(controllersRef.current).forEach((c) =>
+          c.preload?.().catch((err) => console.error("Perxona preload failed:", err))
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+      Object.values(controllersRef.current).forEach((c) => c?.stop());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  const beginInterview = useCallback(async () => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    setBegun(true);
+    setConnecting(true);
+
+    await setupPromiseRef.current;
+    const controllers = Object.values(controllersRef.current);
+    if (!controllers.length) return; // setup failed — error state already set
+
+    const pending = pendingResumeRef.current;
+    if (pending?.question) {
+      // Resuming an interview that already has an unanswered question —
+      // re-speak it rather than asking the backend for a new one (the
+      // backend now also guards against this, but skip the redundant
+      // round-trip here too).
+      await Promise.all(controllers.map((c) => c.start()));
+      setConnecting(false);
+      setQuestionsAsked(pending.questionsAsked ?? 0);
+      await speakAndListen(pending.question, pending.emotion, "question", pending.speaker);
+      return;
+    }
+
+    // Truly fresh session (or a reload mid-feedback-phase, see the skipped
+    // shortcut above) — fire the opening/pending-turn call alongside widget
+    // connection instead of after it — 3D asset loading/connection is
+    // normally the slower side, so by the time the avatar is ready to
+    // speak the text is usually already sitting here waiting, instead of
+    // the candidate seeing a connected-but-silent avatar while Gemini
+    // generates. The backend's null-answer handling already replays
+    // whatever's actually pending (including the right turn_kind) rather
+    // than always asking something brand new.
+    const openingPromise = fetch(`/api/sessions/${sessionId}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer: null }),
+    }).then((res) => res.json());
+
+    await Promise.all(controllers.map((c) => c.start()));
+    const opening = await openingPromise;
+    setConnecting(false);
+    setQuestionsAsked(opening.questions_asked);
+    await speakAndListen(opening.question, opening.emotion, opening.turn_kind, opening.speaker);
+  }, [sessionId, speakAndListen]);
+
+  const competencyCount = session?.competencies?.length ?? 0;
+  const questionRounds = session?.question_rounds ?? 10;
+  const interviewers = session?.interviewers?.length ? session.interviewers : ["alex"];
+  const perxonaConnected = interviewers.length > 0 && interviewers.every((id) => perxonaConnectedMap[id]);
+
+  return (
+    <main className="interview-screen">
+      <div className="interview-screen__glow" aria-hidden="true" />
+
+      <header className="interview-screen__header">
+        <div className="interview-screen__brand-row">
+          <div className="interview-screen__wordmark">Mensetsu AI</div>
+          <div className="interview-screen__status-lights">
+            <span className="status-light" title={`Gemini: ${geminiConnected ? "connected" : "not connected"}`}>
+              <span className={`status-light__dot${geminiConnected ? " is-green" : " is-red"}`} />
+              Gemini
+            </span>
+            <span
+              className="status-light"
+              title={`Perxona: ${perxonaConnected ? "connected" : "not connected"}`}
+            >
+              <span className={`status-light__dot${perxonaConnected ? " is-green" : " is-red"}`} />
+              Perxona
+            </span>
+            <button
+              type="button"
+              className="interview-screen__refresh-button"
+              title="Start a brand new interview"
+              onClick={() => navigate("/setup")}
+            >
+              ⟳ New interview
+            </button>
+          </div>
+        </div>
+        <div className="interview-screen__progress">
+          <div className="interview-screen__steps" aria-hidden="true">
+            {Array.from({ length: questionRounds }).map((_, i) => (
+              <span key={i} className={i < questionsAsked ? "is-done" : ""} />
+            ))}
+          </div>
+          <span>
+            Question {questionsAsked} of {questionRounds} · {competencyCount} competencies planned
+          </span>
+        </div>
+      </header>
+
+      <div className="interview-screen__panels">
+        <div
+          className={`avatar-panel${interviewers.length === 2 ? " avatar-panel--dual" : ""}`}
+          ref={avatarPanelRef}
+        >
+          <div className="avatar-panel__slots">
+            {interviewers.map((id) => (
+              <div
+                key={id}
+                className={`avatar-panel__slot${currentSpeaker === id && speaking ? " is-speaking" : ""}`}
+              >
+                {/* Always mounted, regardless of avatarMode — PerxonaAvatarController.start()
+                    needs this ref to exist the moment it runs, which can happen before
+                    React has re-rendered with avatarMode === "perxona" (avatarMode starts
+                    as "mock" and only flips after an async /api/config fetch resolves).
+                    Conditionally rendering this div meant the ref was still null when
+                    start() ran, causing "Cannot read properties of null (reading
+                    'appendChild')". Positioned absolute so it doesn't affect the
+                    placeholder's flex layout below when unused (mock mode). */}
+                <div
+                  ref={(el) => {
+                    perxonaContainerNodesRef.current[id] = el;
+                  }}
+                  className="avatar-panel__perxona-container"
+                />
+                {avatarMode !== "perxona" && (
+                  <div className="avatar-panel__placeholder">
+                    <div className="avatar-panel__avatar-icon" aria-hidden="true">
+                      🧑‍💼
+                    </div>
+                    <p className="avatar-panel__question">
+                      {currentSpeaker === id ? question || "Connecting…" : ""}
+                    </p>
+                    {currentSpeaker === id && (
+                      <p className="avatar-panel__emotion">{EMOTION_LABEL[emotion] || emotion}</p>
+                    )}
+                  </div>
+                )}
+                {interviewers.length === 2 && (
+                  <span className="avatar-panel__slot-name">{INTERVIEWER_NAMES[id] || id}</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="avatar-panel__camera-overlay">
+            <CameraPanel candidateName={session?.candidate_name} />
+          </div>
+          {!begun && (
+            <div className="avatar-panel__start-gate">
+              <button type="button" onClick={beginInterview} disabled={connecting}>
+                {connecting ? "Connecting…" : "Tap to begin your interview"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="interview-chat-column" style={columnHeight ? { height: `${columnHeight}px` } : undefined}>
+          <div className="interview-chat">
+            <div className="interview-chat__list">
+              {transcript.length === 0 && <p className="interview-chat__empty">The conversation will appear here.</p>}
+              {transcript.map((entry, i) => (
+                <div key={i} className={`interview-chat__bubble interview-chat__bubble--${entry.speaker}`}>
+                  <span className="interview-chat__speaker">
+                    {entry.speaker === "candidate"
+                      ? session?.candidate_name || "You"
+                      : INTERVIEWER_NAMES[entry.speaker] || entry.speaker}
+                  </span>
+                  <p>{entry.text}</p>
+                </div>
+              ))}
+              <div ref={transcriptEndRef} />
+            </div>
+          </div>
+
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
+
+          {micUnsupported && turnKind !== "feedback_item" && (
+            <p className="field-error" role="alert">
+              Voice input isn't available in this browser. Please type your answer below.
+            </p>
+          )}
+
+          {turnKind === "feedback_item" ? (
+            <div className="interview-screen__continue-row">
+              <span className="interview-screen__continue-status">
+                {speaking ? `${INTERVIEWER_NAMES[currentSpeaker] || "The interviewer"} is speaking…` : "Moving to the next point…"}
+              </span>
+            </div>
+          ) : (
+            <form
+              className="interview-screen__answer-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                submitAnswer(answerDraft);
+              }}
+            >
+              <textarea
+                value={answerDraft}
+                onChange={(e) => setAnswerDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter sends, like a chat app — Shift+Enter still inserts a
+                  // newline for anyone who actually wants a multi-line answer.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submitAnswer(answerDraft);
+                  }
+                }}
+                placeholder="Type your answer, or use the mic button"
+                rows={2}
+                disabled={submitting}
+              />
+              <button
+                type="button"
+                className={`interview-screen__mic-button${listening ? " is-active" : ""}`}
+                onClick={toggleMic}
+                disabled={submitting || speaking}
+                title={listening ? "Stop listening" : "Click to speak your answer"}
+              >
+                {listening ? "Listening…" : "Speak"}
+              </button>
+              <button type="submit" disabled={submitting || !answerDraft.trim()}>
+                Send answer
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+
+      <p className="interview-screen__powered-by">
+        <PerxonaMark /> Powered by Perxona
+      </p>
+    </main>
+  );
+}
+
+function PerxonaMark() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M9 8v8l7-4-7-4Z" fill="currentColor" />
+    </svg>
+  );
+}

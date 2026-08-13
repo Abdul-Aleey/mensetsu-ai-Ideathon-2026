@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="{{ language }}">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: A4;
+    margin: 2.2cm 1.8cm;
+    @bottom-center {
+      content: "Mensetsu — decision-support report, page " counter(page) " of " counter(pages);
+      font-size: 8pt;
+      color: #8a8fa8;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: "Noto Sans JP", "Noto Sans CJK JP", "Helvetica Neue", Arial, sans-serif;
+    color: #1a1a2e;
+    font-size: 10.5pt;
+    line-height: 1.55;
+  }
+
+  h1, h2, h3 { font-family: inherit; margin: 0; }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 3px solid #1c2454;
+    padding-bottom: 0.9em;
+    margin-bottom: 1.4em;
+  }
+
+  .header__role { font-size: 20pt; font-weight: 700; color: #1c2454; margin-bottom: 0.15em; }
+  .header__meta { font-size: 9pt; color: #5a5f7a; }
+  .header__meta div { margin-bottom: 0.15em; }
+
+  .badge {
+    display: inline-block;
+    padding: 0.45em 1em;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 10pt;
+    color: #fff;
+    white-space: nowrap;
+  }
+  .badge--advance { background: #1e7a4c; }
+  .badge--borderline { background: #b7791f; }
+  .badge--do_not_advance { background: #a1303f; }
+
+  section { margin-bottom: 1.6em; }
+
+  .section-title {
+    font-size: 12.5pt;
+    font-weight: 700;
+    color: #1c2454;
+    margin-bottom: 0.6em;
+    padding-bottom: 0.25em;
+    border-bottom: 1px solid #dfe1ee;
+  }
+
+  .summary { font-size: 11pt; }
+
+  table.scorecard { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  table.scorecard th {
+    text-align: left;
+    background: #f0f1f8;
+    color: #1c2454;
+    padding: 0.5em 0.7em;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  table.scorecard td {
+    padding: 0.55em 0.7em;
+    border-bottom: 1px solid #ececf4;
+    vertical-align: top;
+  }
+  .rating { font-weight: 700; }
+  .rating--Strong { color: #1e7a4c; }
+  .rating--Adequate { color: #b7791f; }
+  .rating--Weak { color: #a1303f; }
+  .type-tag {
+    font-size: 8pt;
+    color: #5a5f7a;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .two-col { display: flex; gap: 1.4em; }
+  .two-col > div { flex: 1; }
+  .two-col h3 { font-size: 10.5pt; margin-bottom: 0.5em; }
+  .two-col ul { margin: 0; padding-left: 1.1em; }
+  .two-col li { margin-bottom: 0.4em; }
+  .pros h3 { color: #1e7a4c; }
+  .cons h3 { color: #a1303f; }
+
+  .reality-check, .next-steps { font-size: 10.5pt; }
+
+  .panel { display: flex; gap: 1.4em; margin-bottom: 1em; }
+  .panel > div { flex: 1; border-left: 3px solid #dfe1ee; padding-left: 0.8em; }
+  .panel h3 { font-size: 10.5pt; color: #1c2454; margin-bottom: 0.4em; }
+  .panel p { font-size: 10pt; margin: 0; }
+  .panel-synthesis__summary { font-size: 10.5pt; font-style: italic; color: #33364a; }
+
+  .transcript-turn { margin-bottom: 1em; page-break-inside: avoid; }
+  .transcript-q { font-weight: 700; color: #1c2454; }
+  .transcript-meta { font-size: 8pt; color: #8a8fa8; margin-left: 0.5em; }
+  .transcript-a { margin-top: 0.25em; color: #33364a; }
+  .transcript-evidence {
+    margin-top: 0.3em;
+    font-size: 9pt;
+    color: #5a5f7a;
+    font-style: italic;
+    border-left: 3px solid #dfe1ee;
+    padding-left: 0.6em;
+  }
+
+  .responsible-use {
+    margin-top: 1.6em;
+    font-size: 8pt;
+    color: #8a8fa8;
+    border-top: 1px solid #dfe1ee;
+    padding-top: 0.6em;
+  }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <div class="header__role">{{ role_title or "Role not specified" }}</div>
+      <div class="header__meta">
+        <div>Candidate: {{ candidate_name or "Not identified" }}</div>
+        <div>Date: {{ date }}</div>
+        <div>Interview language: {{ language_label }}</div>
+      </div>
+    </div>
+    <span class="badge badge--{{ recommendation }}">{{ recommendation_label }}</span>
+  </div>
+
+  <section>
+    <div class="section-title">Executive summary</div>
+    <p class="summary">{{ summary }}</p>
+  </section>
+
+  <section>
+    <div class="section-title">Competency scorecard</div>
+    <table class="scorecard">
+      <thead>
+        <tr><th>Competency</th><th>Rating</th><th>Justification</th></tr>
+      </thead>
+      <tbody>
+        {% for row in scorecard %}
+        <tr>
+          <td>{{ row.competency }}<br/><span class="type-tag">{{ row.type }}</span></td>
+          <td><span class="rating rating--{{ row.rating }}">{{ row.rating }}</span></td>
+          <td>{{ row.justification }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="two-col">
+    <div class="pros">
+      <h3>Strengths</h3>
+      <ul>{% for p in pros %}<li>{{ p }}</li>{% endfor %}</ul>
+    </div>
+    <div class="cons">
+      <h3>Concerns</h3>
+      <ul>{% for c in cons %}<li>{{ c }}</li>{% endfor %}</ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title">Résumé vs. interview — reality check</div>
+    <p class="reality-check">{{ resume_reality_check }}</p>
+  </section>
+
+  {% if panel_synthesis %}
+  <section>
+    <div class="section-title">Panel perspectives</div>
+    <div class="panel">
+      {% for p in panel_synthesis.perspectives %}
+      <div>
+        <h3>{{ interviewer_names.get(p.speaker, p.speaker) }}</h3>
+        <p>{{ p.read }}</p>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="panel-synthesis__summary">{{ panel_synthesis.synthesis }}</p>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-title">Recommendation &amp; next steps</div>
+    <p class="next-steps">{{ next_steps }}</p>
+  </section>
+
+  <section style="page-break-before: always;">
+    <div class="section-title">Full transcript</div>
+    {% for turn in transcript %}
+    <div class="transcript-turn">
+      <div class="transcript-q">Q{{ turn.index + 1 }}. {{ turn.question }}<span class="transcript-meta">{{ turn.competency or "" }}</span></div>
+      <div class="transcript-a">{{ turn.answer or "(no answer recorded)" }}</div>
+      {% if turn.evidence %}<div class="transcript-evidence">&ldquo;{{ turn.evidence }}&rdquo;</div>{% endif %}
+    </div>
+    {% endfor %}
+  </section>
+
+  <div class="responsible-use">
+    Every recommendation from Mensetsu AI is a starting point for your team's journey to the right candidate.
+  </div>
+
+</body>
+</html>

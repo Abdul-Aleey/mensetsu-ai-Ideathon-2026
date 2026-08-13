@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+backend/static/
+backend/mensetsu.db
+*.db
+.env
+generated_pdfs/
+MEMORY.md
