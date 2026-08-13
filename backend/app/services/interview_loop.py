@@ -26,22 +26,25 @@ guaranteed to terminate:
 3a. "closing"      — hiring mode (session.mode == "hiring") only: "do you
                      have any questions for me?" then exactly one bounded
                      response. Fixed overhead, never counted.
-3b. "feedback"     — practice mode (session.mode == "practice") only: the
-                     Coach agent's per-competency STAR feedback, delivered
-                     one item at a time. In a two-interviewer session,
-                     whenever the next item belongs to the other
-                     interviewer, the one who just spoke asks "any
-                     questions for me?" before handing off (see
-                     _handle_feedback's "handover" pending kind) — solo
-                     sessions never hit this, since every item shares the
-                     same speaker. After the last item, the last speaker
-                     asks that same gate once more ("final" pending kind)
-                     and one bounded response then ends the session. Also
-                     fixed overhead, never counted.
+3b. "feedback"     — practice mode (session.mode == "practice") only: opens
+                     with a short transition line acknowledging the
+                     candidate's final competency answer and announcing the
+                     feedback walkthrough ("intro" pending kind — see
+                     _transition_to_feedback), then the Coach agent's per-
+                     competency STAR feedback, delivered one item at a
+                     time. After each item the candidate gets an explicit
+                     choice (see _handle_feedback): ask a follow-up
+                     question about it, or click "Next" — every step is a
+                     real, re-clickable user action rather than a silent
+                     auto-advance chain. Once the last item's "Next" is
+                     clicked (or there was nothing to give feedback on at
+                     all), whoever spoke last signs off and the session
+                     ends. Also fixed overhead, never counted.
 4. "complete"      — terminal.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy.orm import Session as DBSession
 
@@ -51,9 +54,9 @@ from ..interviewers import INTERVIEWER_PROFILES
 from .assessor import assess_turn
 from .coach import (
     generate_coaching,
-    generate_coaching_qna_response,
-    generate_handover_qna_prompt,
-    generate_handover_qna_response,
+    generate_feedback_closing,
+    generate_feedback_item_followup,
+    generate_feedback_transition,
 )
 from .interviewer import (
     generate_closing_prompt,
@@ -71,9 +74,14 @@ def advance_interview(db: DBSession, session: models.Session, answer: str | None
     turns = session.turns
     competencies = session.competencies
 
+    pending = None
     if answer is not None:
         pending = _record_answer(turns, answer)
-        _assess_pending(pending)
+        # Competencies phase runs the Assessor concurrently with the Router
+        # instead of before it (see _handle_competencies) — skip the eager
+        # call here so it isn't run twice.
+        if session.phase != "competencies":
+            _assess_pending(pending)
     elif turns:
         # A null answer means "give me the current question" — the frontend
         # only means to send this once, right after session creation, to
@@ -88,7 +96,7 @@ def advance_interview(db: DBSession, session: models.Session, answer: str | None
             competency_name = pending.competency.name if pending.competency else None
             turn_kind = "question"
             if session.phase == "feedback":
-                turn_kind = "feedback_qna" if session.feedback_pending_kind in ("handover", "final") else "feedback_item"
+                turn_kind = "handoff" if session.feedback_pending_kind == "intro" else "feedback_item"
             elif session.phase == "intro" and len(session.interviewers_json) == 2 and session.intro_step == 1:
                 # Reloaded right after the first interviewer's hand-off line,
                 # before the second interviewer's turn was ever generated —
@@ -99,7 +107,7 @@ def advance_interview(db: DBSession, session: models.Session, answer: str | None
     if session.phase == "intro":
         return _handle_intro(db, session, competencies, turns, answer)
     if session.phase == "competencies":
-        return _handle_competencies(db, session, competencies, turns, answer)
+        return _handle_competencies(db, session, competencies, turns, answer, pending)
     if session.phase == "closing":
         return _handle_closing(db, session, answer)
     if session.phase == "feedback":
@@ -208,7 +216,7 @@ def _handle_intro(db, session, competencies, turns, answer):
 # ---------------------------------------------------------------------------
 
 
-def _handle_competencies(db, session, competencies, turns, answer):
+def _handle_competencies(db, session, competencies, turns, answer, pending):
     old_idx = session.current_competency_index
     # The router is called with the CURRENT competency's speaker, since we
     # don't yet know whether it will advance (in which case the new
@@ -223,7 +231,29 @@ def _handle_competencies(db, session, competencies, turns, answer):
     speaker = _pick_speaker(session, old_idx)
     persona = INTERVIEWER_PROFILES[speaker]
     state = _serialize_state(session, competencies, turns, old_idx)
-    routed = route_next_turn(state, answer, persona)
+
+    # The Assessor's résumé-reality check for this answer never feeds the
+    # Router's own decision — the Router prompt already gets the raw answer
+    # and the résumé claim directly (see _build_router_prompt); the
+    # Assessor's output only updates competency.notes for the later report/
+    # coaching. Running both Gemini calls concurrently instead of Assessor-
+    # then-Router roughly halves this turn's latency — reported live as a
+    # 10-20s wait after every answer, from two sequential ~5-10s calls.
+    # assess_future only ever does the Gemini call (_run_assessment), never
+    # the ORM write-back — _apply_assessment happens below, strictly after
+    # the thread has been joined, so the Session's dirty-tracking is never
+    # touched from two threads at once. The `finally` guarantees
+    # assess_future.result() is still called even when route_next_turn
+    # itself raises — without it, a simultaneous Assessor failure (e.g.
+    # during a Gemini outage affecting both calls) was silently discarded
+    # instead of surfacing.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assess_future = pool.submit(_run_assessment, pending)
+        try:
+            routed = route_next_turn(state, answer, persona)
+        finally:
+            assessment = assess_future.result()
+    _apply_assessment(pending, assessment)
     decision = routed.get("decision", "advance")
 
     new_idx = _apply_decision(session, competencies, old_idx, decision)
@@ -283,7 +313,7 @@ def _transition_out_of_competencies(db, session, competencies, turns):
     a role/company Q&A, practice sessions get avatar-delivered STAR
     coaching instead."""
     if session.mode == "practice":
-        return _transition_to_feedback(db, session, competencies, turns)
+        return _transition_to_feedback(db, session)
     return _transition_to_closing(db, session, competencies, turns)
 
 
@@ -318,13 +348,34 @@ def _handle_closing(db, session, answer):
     }
 
 
-def _transition_to_feedback(db, session, competencies, turns):
-    """Practice mode only. Runs the Coach agent ONCE and stores its full
-    output on session.coaching_json — the feedback items are then replayed
-    one at a time via _handle_feedback rather than calling Gemini per item.
-    Each item's speaker is whoever asked that competency live (see
-    _competency_speakers) — continuity: the person who asked also coaches."""
+def _transition_to_feedback(db, session):
+    """Practice mode only. Speaks a short transition line FIRST — whoever
+    asked the last competency question acknowledges that answer and
+    announces the feedback walkthrough — before the Coach agent's actual
+    feedback starts (see _begin_feedback_items). Previously this jumped
+    straight into the Coach's first feedback item with nothing said in
+    between: the Router's own acknowledgment of the final answer was
+    generated then discarded (see _handle_competencies — its
+    next_question_text is never used once new_idx runs out of
+    competencies), so the candidate's last answer got no reaction at all
+    and feedback just started — reported live as the session going silent
+    right after the last question."""
     session.phase = "feedback"
+    speaker = session.last_speaker
+    persona = INTERVIEWER_PROFILES[speaker]
+    transition = generate_feedback_transition(session, persona)
+    turn = _create_turn(db, session, transition["question_text"], None, False, transition["emotion_tag"], speaker)
+    session.feedback_pending_kind = "intro"
+    db.commit()
+    return _turn_response(session, turn.question, turn.emotion, None, turn_kind="handoff")
+
+
+def _begin_feedback_items(db, session):
+    """Runs the Coach agent ONCE and stores its full output on
+    session.coaching_json — the feedback items are then replayed one at a
+    time via _handle_feedback rather than calling Gemini per item. Each
+    item's speaker is whoever asked that competency live (see
+    _competency_speakers) — continuity: the person who asked also coaches."""
     personas = {iid: INTERVIEWER_PROFILES[iid] for iid in session.interviewers_json}
     competency_speakers = _competency_speakers(session)
     coaching = generate_coaching(session, personas, competency_speakers)
@@ -333,105 +384,78 @@ def _transition_to_feedback(db, session, competencies, turns):
 
     if not items:
         # Nothing was actually asked/covered to give feedback on — skip
-        # straight to the closing Q&A beat.
+        # straight to signing off.
         session.feedback_step = 0
-        db.commit()
-        return _ask_feedback_qna(db, session, coaching)
+        session.feedback_pending_kind = None
+        return _close_feedback_session(db, session)
 
-    first = items[0]
-    speaker = first.get("speaker", session.interviewers_json[0])
-    turn = _create_turn(db, session, first.get("spoken_text", ""), None, False, first.get("emotion_tag", "neutral"), speaker)
-    session.feedback_step = 1
+    return _deliver_feedback_item(db, session, items, 0)
+
+
+def _deliver_feedback_item(db, session, items, index):
+    item = items[index]
+    speaker = item.get("speaker", session.interviewers_json[0])
+    turn = _create_turn(db, session, item.get("spoken_text", ""), None, False, item.get("emotion_tag", "neutral"), speaker)
+    session.feedback_step = index + 1
+    session.feedback_pending_kind = None
     db.commit()
-    return _turn_response(session, turn.question, turn.emotion, first.get("competency"), turn_kind="feedback_item")
+    return _turn_response(session, turn.question, turn.emotion, item.get("competency"), turn_kind="feedback_item")
+
+
+def _close_feedback_session(db, session):
+    speaker = session.last_speaker
+    persona = INTERVIEWER_PROFILES[speaker]
+    closing = generate_feedback_closing(session, persona)
+    _create_turn(db, session, closing["response_text"], None, False, closing["emotion_tag"], speaker)
+    session.phase = "complete"
+    session.status = "complete"
+    db.commit()
+    return {
+        "status": "complete",
+        "questions_asked": session.questions_asked,
+        "closing_message": closing["response_text"],
+        "speaker": speaker,
+        "emotion": closing["emotion_tag"],
+    }
 
 
 def _handle_feedback(db, session, answer):
     coaching = session.coaching_json or {}
     items = coaching.get("items", [])
-    pending = session.feedback_pending_kind
 
-    if pending == "handover":
-        # Reply to "any questions for me before I hand you to <next>?" —
-        # answered in the outgoing speaker's voice, then handed off by name.
-        # The actual next item is a separate turn (see "resume_after_handoff"
-        # below), so the speaker switch always follows a real candidate
-        # interaction instead of two avatars auto-advancing back to back —
-        # which incidentally is also what keeps this safe from the
-        # early-PERFORMANCE_END overlap risk noted in
-        # PerxonaAvatarController.speak() (only reproduced there on
-        # long/multi-sentence lines with no real pause before the next
-        # speaker starts).
-        speaker = session.last_speaker
+    if session.feedback_pending_kind == "intro":
+        # Reply to the transition line — nothing for the candidate to have
+        # answered (it's a "handoff"-kind turn, auto-continued), so `answer`
+        # is empty. Proceed into the actual Coach-generated feedback.
+        return _begin_feedback_items(db, session)
+
+    # Every feedback item leaves the candidate with an explicit choice
+    # (see turn_kind "feedback_item" in Interview.jsx): ask a follow-up
+    # question about the item just discussed, or click "Next". Both post to
+    # this same endpoint — a non-blank answer is a real follow-up question,
+    # a blank one is the "Next" click. Deciding this way (rather than the
+    # previous silent auto-advance chain through intermediate "handover"/
+    # "gate" turns) means every step is a real, re-clickable user action:
+    # if a call fails, the button the candidate just pressed is simply still
+    # there to press again, instead of the UI being left showing "moving to
+    # the next point" with nothing left to click — reported live as the
+    # session getting stuck partway through feedback with no way to recover
+    # short of reloading.
+    current_idx = session.feedback_step - 1
+    if answer and answer.strip() and 0 <= current_idx < len(items):
+        item = items[current_idx]
+        speaker = item.get("speaker", session.interviewers_json[0])
         persona = INTERVIEWER_PROFILES[speaker]
-        next_speaker = items[session.feedback_step]["speaker"]
-        next_persona = INTERVIEWER_PROFILES[next_speaker]
-        delivered = items[: session.feedback_step]
-        response = generate_handover_qna_response(session, delivered, answer or "", persona, next_persona)
+        response = generate_feedback_item_followup(session, item, answer, persona)
         turn = _create_turn(db, session, response["response_text"], None, False, response["emotion_tag"], speaker)
-        session.feedback_pending_kind = "resume_after_handoff"
         db.commit()
-        return _turn_response(session, turn.question, turn.emotion, None, turn_kind="handoff")
+        return _turn_response(session, turn.question, turn.emotion, item.get("competency"), turn_kind="feedback_item")
 
-    if pending == "final":
-        # Reply to the end-of-feedback "any questions about this feedback?"
-        # gate — closes the session.
-        speaker = session.last_speaker
-        persona = INTERVIEWER_PROFILES[speaker]
-        response = generate_coaching_qna_response(session, coaching, answer or "", persona)
-        _create_turn(db, session, response["response_text"], None, False, response["emotion_tag"], speaker)
-        session.phase = "complete"
-        session.status = "complete"
-        db.commit()
-        return {
-            "status": "complete",
-            "questions_asked": session.questions_asked,
-            "closing_message": response["response_text"],
-            "speaker": speaker,
-            "emotion": response["emotion_tag"],
-        }
-
-    # pending is None or "resume_after_handoff" — `answer` here is just the
-    # candidate's "Continue" click, never real content to act on (feedback
-    # items and hand-off lines are never scored: competency_id stays None,
-    # so _assess_pending already skips them).
+    # "Next" — more items to go, or the last one just wrapped up.
     if session.feedback_step < len(items):
-        next_item = items[session.feedback_step]
-        # Gate right before a genuine speaker switch — but not when we just
-        # finished gating for this exact transition (pending ==
-        # "resume_after_handoff"), or the candidate would be asked twice in
-        # a row for the same handover.
-        if pending is None and session.feedback_step > 0:
-            prev_speaker = items[session.feedback_step - 1]["speaker"]
-            if next_item["speaker"] != prev_speaker:
-                persona = INTERVIEWER_PROFILES[prev_speaker]
-                next_persona = INTERVIEWER_PROFILES[next_item["speaker"]]
-                gate = generate_handover_qna_prompt(persona, next_persona, session.language)
-                turn = _create_turn(db, session, gate["question_text"], None, False, gate["emotion_tag"], prev_speaker)
-                session.feedback_pending_kind = "handover"
-                db.commit()
-                return _turn_response(session, turn.question, turn.emotion, None, turn_kind="feedback_qna")
+        return _deliver_feedback_item(db, session, items, session.feedback_step)
 
-        speaker = next_item.get("speaker", session.interviewers_json[0])
-        turn = _create_turn(
-            db, session, next_item.get("spoken_text", ""), None, False, next_item.get("emotion_tag", "neutral"), speaker
-        )
-        session.feedback_step += 1
-        session.feedback_pending_kind = None
-        db.commit()
-        return _turn_response(session, turn.question, turn.emotion, next_item.get("competency"), turn_kind="feedback_item")
-
-    return _ask_feedback_qna(db, session, coaching)
-
-
-def _ask_feedback_qna(db, session, coaching):
-    prompt_text = coaching.get("qna_prompt_text") or "Do you have any questions about this feedback?"
-    emotion = coaching.get("qna_emotion_tag", "encouraging")
-    speaker = session.last_speaker  # whoever delivered the last feedback item (or the sole interviewer if none were delivered)
-    turn = _create_turn(db, session, prompt_text, None, False, emotion, speaker)
-    session.feedback_pending_kind = "final"
-    db.commit()
-    return _turn_response(session, turn.question, turn.emotion, None, turn_kind="feedback_qna")
+    return _close_feedback_session(db, session)
 
 
 # ---------------------------------------------------------------------------
@@ -447,23 +471,40 @@ def _record_answer(turns: list[models.Turn], answer: str) -> models.Turn | None:
     return pending
 
 
-def _assess_pending(pending: models.Turn | None) -> None:
-    """Only competency-phase turns get scored — the intro and closing
-    exchanges are rapport/wrap-up, not part of the scorecard."""
+def _run_assessment(pending: models.Turn | None) -> dict | None:
+    """The Gemini call only — no ORM writes, so this is what's safe to hand
+    to a background thread (see _handle_competencies). SQLAlchemy Sessions
+    aren't thread-safe for concurrent mutation; see _apply_assessment,
+    which does the actual write-back and must run on the main thread only,
+    after the thread has been joined."""
     if pending is None or pending.competency_id is None:
-        return
+        return None
     competency = pending.competency
-    assessment = assess_turn(
+    return assess_turn(
         question=pending.question,
         answer=pending.answer,
         competency_name=competency.name,
         resume_claim=competency.resume_claim,
     )
+
+
+def _apply_assessment(pending: models.Turn | None, assessment: dict | None) -> None:
+    if pending is None or assessment is None:
+        return
+    competency = pending.competency
     pending.evidence = assessment.get("evidence_quote")
     reality = assessment.get("resume_reality", "not_applicable")
     note = assessment.get("notes", "")
     existing = f"{competency.notes}\n" if competency.notes else ""
     competency.notes = f"{existing}[{reality}] {note}".strip()
+
+
+def _assess_pending(pending: models.Turn | None) -> None:
+    """Only competency-phase turns get scored — the intro and closing
+    exchanges are rapport/wrap-up, not part of the scorecard. Sequential
+    call-then-write for callers outside the competencies phase; see
+    _handle_competencies for the concurrent version."""
+    _apply_assessment(pending, _run_assessment(pending))
 
 
 def _pick_speaker(session, competency_index: int) -> str:

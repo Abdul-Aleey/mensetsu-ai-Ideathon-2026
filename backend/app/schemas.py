@@ -53,7 +53,7 @@ class AnswerOut(BaseModel):
     target_competency: str | None = None
     questions_asked: int = 0  # primary questions only — follow-ups don't count
     closing_message: str | None = None
-    turn_kind: str = "question"  # "question" | "feedback_item" | "feedback_qna"
+    turn_kind: str = "question"  # "question" | "feedback_item" | "handoff"
 
 
 class ReportOut(BaseModel):

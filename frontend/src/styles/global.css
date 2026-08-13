@@ -1271,17 +1271,15 @@ button[type="submit"]:disabled {
   cursor: not-allowed;
 }
 
-.interview-screen__continue-row {
-  display: flex;
-  justify-content: center;
-  padding: var(--space-3) 0;
+.interview-screen__next-button {
+  background: var(--ink-700);
+  color: var(--paper);
+  border: 1.5px solid var(--border-on-dark);
 }
 
-.interview-screen__continue-status {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--ink-400);
-  letter-spacing: 0.02em;
+.interview-screen__next-button:hover:not(:disabled) {
+  background: var(--ink-600);
+  color: #fff;
 }
 
 .interview-screen__mic-button {

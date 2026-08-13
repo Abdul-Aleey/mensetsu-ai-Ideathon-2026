@@ -27,9 +27,10 @@ export default function Interview() {
   // two-interviewer session the other one just sits idle until their turn.
   const [currentSpeaker, setCurrentSpeaker] = useState("alex");
   const currentSpeakerRef = useRef("alex"); // mirrors currentSpeaker for callbacks that need a fresh read, not a stale closure
-  // "question" (normal answer form) | "feedback_item" (Continue button, practice
-  // mode's per-competency STAR coaching) | "feedback_qna" (normal answer form,
-  // asking if the candidate has questions about the feedback).
+  // "question" (normal answer form) | "feedback_item" (practice mode's
+  // per-competency STAR coaching — same answer form, plus a "Next" button
+  // since replying is optional there) | "handoff" (nothing for the
+  // candidate to answer at all, auto-advances).
   const [turnKind, setTurnKind] = useState("question");
   const [questionsAsked, setQuestionsAsked] = useState(0);
   const [speaking, setSpeaking] = useState(false);
@@ -128,16 +129,24 @@ export default function Interview() {
       setSpeaking(true);
       await speakAndPushTranscript(controllersRef.current[speaker], speaker, text, emo);
       setSpeaking(false);
-      if (kind === "feedback_item" || kind === "handoff") {
-        // Nothing for the candidate to say — either a practice-mode coaching
-        // beat, or (kind === "handoff") the first interviewer in a
-        // two-interviewer session passing things to the second one. Move
+      if (kind === "handoff") {
+        // Nothing for the candidate to say — the first interviewer in a
+        // two-interviewer session passing things to the second one, or the
+        // practice-mode transition line right before feedback starts. Move
         // straight to the next turn the moment the current interviewer
         // finishes speaking, instead of listening for a reply that was
         // never coming.
         continueWithoutAnswerRef.current?.();
         return;
       }
+      // "feedback_item" also opens the mic/text form here (same as an
+      // ordinary question) — the candidate can ask a follow-up about what
+      // was just said. Moving to the next item is now its own explicit
+      // "Next" button (see the render below) rather than auto-advancing:
+      // that auto-advance chain had no recovery if any single hop failed —
+      // reported live as the session getting stuck showing "moving to the
+      // next point" with nothing left to click. A button can just be
+      // clicked again.
       const ok = await controllersRef.current[speaker].startListening();
       setListening(ok);
       setMicUnsupported(!ok);
@@ -232,6 +241,13 @@ export default function Interview() {
     if (submitting) return;
     setSubmitting(true);
     setError(null);
+    // Clears any half-typed follow-up question left in the box — reachable
+    // now that feedback_item turns show a real text form alongside the
+    // "Next feedback" button: without this, text typed but not sent here
+    // would still be sitting in the box on the next item's form, and a
+    // later accidental Enter/click would send it as a follow-up about the
+    // wrong competency.
+    setAnswerDraft("");
     const speakerNow = currentSpeakerRef.current;
     controllersRef.current[speakerNow].setThinking(true);
     setThinking(true);
@@ -358,7 +374,7 @@ export default function Interview() {
           // (nothing was actually said) — skip the candidate bubble for those.
           pushTranscript(turn.speaker || interviewers[0], turn.question);
           if (turn.answer !== "") pushTranscript("candidate", turn.answer);
-        } else if (data.phase !== "feedback") {
+        } else if (data.phase !== "feedback" && !(data.phase === "intro" && interviewers.length === 2)) {
           // Still-pending question — don't push it yet. beginInterview()
           // re-speaks it below, and that speak() call is what pushes it via
           // onSpeakStart, so it only appears once the avatar actually says it.
@@ -368,11 +384,17 @@ export default function Interview() {
             speaker: turn.speaker || interviewers[0],
           };
         }
-        // else: reloading mid-feedback-phase. The transcript endpoint doesn't
-        // carry turn_kind (feedback_item vs feedback_qna), so skip this
-        // shortcut and let beginInterview's "fresh" branch re-ask the backend
-        // directly below — advance_interview's null-answer replay already
-        // returns the correct turn_kind for that case.
+        // else: reloading mid-feedback-phase, or mid-intro in a two-
+        // interviewer session. The transcript endpoint doesn't carry
+        // turn_kind, so this shortcut can't tell a real question apart from
+        // a "handoff" turn (e.g. reloading right after the first
+        // interviewer's hand-off line, before the second one's turn was
+        // ever generated) — hardcoding "question" here would open the mic
+        // and wait for a reply that was never coming instead of auto-
+        // advancing. Skip the shortcut and let beginInterview's "fresh"
+        // branch re-ask the backend directly below — advance_interview's
+        // null-answer replay already returns the correct turn_kind for
+        // both cases.
       }
       if (pendingResumeRef.current) {
         pendingResumeRef.current.questionsAsked = data.questions_asked;
@@ -407,7 +429,15 @@ export default function Interview() {
 
     await setupPromiseRef.current;
     const controllers = Object.values(controllersRef.current);
-    if (!controllers.length) return; // setup failed — error state already set
+    if (!controllers.length) {
+      // Setup failed — error state already set. Without clearing connecting
+      // here, the "Connecting…" overlay (now visible for the whole
+      // connecting window, not just pre-click — see below) would stay
+      // stuck on screen forever on top of the error message instead of
+      // getting out of the way of it.
+      setConnecting(false);
+      return;
+    }
 
     const pending = pendingResumeRef.current;
     if (pending?.question) {
@@ -537,10 +567,21 @@ export default function Interview() {
           <div className="avatar-panel__camera-overlay">
             <CameraPanel candidateName={session?.candidate_name} />
           </div>
-          {!begun && (
+          {(!begun || connecting) && (
+            // begun flips to true the instant the button is clicked (before
+            // any of the actual connecting work happens), so gating this
+            // overlay on !begun alone made it disappear immediately on
+            // click — in real Perxona mode (where the mock-mode placeholder
+            // text below is disabled) that left nothing on screen telling
+            // the candidate the avatar was still loading, so the first
+            // question started being spoken with no visible cue to pay
+            // attention, and got missed. Keeping the overlay up for the
+            // whole `connecting` window — not just pre-click — means it
+            // only disappears right as speakAndListen actually starts
+            // talking.
             <div className="avatar-panel__start-gate">
               <button type="button" onClick={beginInterview} disabled={connecting}>
-                {connecting ? "Connecting…" : "Tap to begin your interview"}
+                {connecting ? "Connecting your interviewer…" : "Tap to begin your interview"}
               </button>
             </div>
           )}
@@ -570,55 +611,62 @@ export default function Interview() {
             </p>
           )}
 
-          {micUnsupported && turnKind !== "feedback_item" && (
+          {micUnsupported && (
             <p className="field-error" role="alert">
               Voice input isn't available in this browser. Please type your answer below.
             </p>
           )}
 
-          {turnKind === "feedback_item" ? (
-            <div className="interview-screen__continue-row">
-              <span className="interview-screen__continue-status">
-                {speaking ? `${INTERVIEWER_NAMES[currentSpeaker] || "The interviewer"} is speaking…` : "Moving to the next point…"}
-              </span>
-            </div>
-          ) : (
-            <form
-              className="interview-screen__answer-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                submitAnswer(answerDraft);
+          <form
+            className="interview-screen__answer-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitAnswer(answerDraft);
+            }}
+          >
+            <textarea
+              value={answerDraft}
+              onChange={(e) => setAnswerDraft(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter sends, like a chat app — Shift+Enter still inserts a
+                // newline for anyone who actually wants a multi-line answer.
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submitAnswer(answerDraft);
+                }
               }}
+              placeholder={
+                turnKind === "feedback_item"
+                  ? "Ask a follow-up question about this feedback, or click Next"
+                  : "Type your answer, or use the mic button"
+              }
+              rows={2}
+              disabled={submitting}
+            />
+            <button
+              type="button"
+              className={`interview-screen__mic-button${listening ? " is-active" : ""}`}
+              onClick={toggleMic}
+              disabled={submitting || speaking}
+              title={listening ? "Stop listening" : "Click to speak your answer"}
             >
-              <textarea
-                value={answerDraft}
-                onChange={(e) => setAnswerDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  // Enter sends, like a chat app — Shift+Enter still inserts a
-                  // newline for anyone who actually wants a multi-line answer.
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    submitAnswer(answerDraft);
-                  }
-                }}
-                placeholder="Type your answer, or use the mic button"
-                rows={2}
-                disabled={submitting}
-              />
+              {listening ? "Listening…" : "Speak"}
+            </button>
+            {turnKind === "feedback_item" && (
               <button
                 type="button"
-                className={`interview-screen__mic-button${listening ? " is-active" : ""}`}
-                onClick={toggleMic}
+                className="interview-screen__next-button"
+                onClick={() => continueWithoutAnswer()}
                 disabled={submitting || speaking}
-                title={listening ? "Stop listening" : "Click to speak your answer"}
+                title="Move on to the next piece of feedback"
               >
-                {listening ? "Listening…" : "Speak"}
+                Next feedback
               </button>
-              <button type="submit" disabled={submitting || !answerDraft.trim()}>
-                Send answer
-              </button>
-            </form>
-          )}
+            )}
+            <button type="submit" disabled={submitting || !answerDraft.trim()}>
+              {turnKind === "feedback_item" ? "Ask" : "Send answer"}
+            </button>
+          </form>
         </div>
       </div>
 

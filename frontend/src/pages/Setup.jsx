@@ -61,7 +61,7 @@ const MODE_COPY = {
     submitLabel: "Start practicing →",
     features: [
       { icon: <TargetIcon />, text: "The same live, adaptive interview a real screening would run" },
-      { icon: <WaveIcon />, text: "The avatar walks you through feedback after every question" },
+      { icon: <WaveIcon />, text: "Once the interview's done, the avatar walks you through feedback question by question" },
       { icon: <ChartIcon />, text: "A model example answer for each question, plus a take-home coaching report" },
     ],
   },

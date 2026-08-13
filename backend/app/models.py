@@ -43,13 +43,11 @@ class Session(Base):
     # practice mode only — mirrors intro_step's pattern for the feedback phase.
     # Count of feedback items delivered so far (0..len(items)).
     feedback_step: Mapped[int] = mapped_column(Integer, default=0)
-    # practice mode only — where we are in the feedback phase's handover
-    # state machine (see interview_loop.py's _handle_feedback):
-    # None = nothing pending, decide fresh; "handover" = just asked "any
-    # questions for me?" ahead of a speaker switch, awaiting reply;
-    # "resume_after_handoff" = the handover was just answered and handed
-    # off, next call delivers the next item without re-gating; "final" =
-    # just asked the end-of-feedback "any questions?" gate, awaiting reply.
+    # practice mode only — "intro" while the transition line into feedback
+    # (acknowledging the last competency answer) is pending a reply, None
+    # otherwise (see interview_loop.py's _handle_feedback: once feedback
+    # items are underway, deciding follow-up vs. "Next" is just a matter of
+    # whether the candidate's answer was blank, no extra state needed).
     feedback_pending_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     coaching_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

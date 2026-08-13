@@ -6,13 +6,31 @@ the avatar speaks AND the content the written practice report is built from.
 from .. import models
 from ..prompts.coach import (
     coach_feedback_system_instruction,
-    coach_handover_qna_system_instruction,
-    coach_handover_response_system_instruction,
-    coach_qna_response_system_instruction,
+    coach_item_followup_system_instruction,
+    coach_session_closing_system_instruction,
+    coach_transition_system_instruction,
 )
 from .gemini_client import generate_json
 
 VALID_EMOTIONS = {"encouraging", "probing", "approving", "neutral"}
+
+
+def generate_feedback_transition(session: models.Session, persona: dict) -> dict:
+    """The line spoken right after the last competency answer, before the
+    Coach agent's actual feedback walkthrough starts — see
+    interview_loop.py's _transition_to_feedback. Grounded in the last real
+    Q&A pair so the acknowledgment reacts to what was actually said instead
+    of a generic "let's move on" line."""
+    last_turn = next((t for t in reversed(session.turns) if t.answer is not None), None)
+    prompt = (
+        f"Interview language: {session.language}\n"
+        f"Last question asked: {last_turn.question if last_turn else ''}\n"
+        f"Candidate's last answer: {last_turn.answer if last_turn else ''}"
+    )
+    result = generate_json(coach_transition_system_instruction(persona), prompt)
+    if result.get("emotion_tag") not in VALID_EMOTIONS:
+        result["emotion_tag"] = "encouraging"
+    return result
 
 
 def generate_coaching(session: models.Session, personas: dict, competency_speakers: dict[str, str]) -> dict:
@@ -59,44 +77,29 @@ def generate_coaching(session: models.Session, personas: dict, competency_speake
         # Attach deterministically from our own mapping rather than trusting
         # the model to echo it back correctly — this is data we already know.
         item["speaker"] = competency_speakers.get(item.get("competency"), next(iter(personas)))
-    if result.get("qna_emotion_tag") not in VALID_EMOTIONS:
-        result["qna_emotion_tag"] = "encouraging"
     return result
 
 
-def generate_handover_qna_prompt(persona: dict, next_persona: dict, language: str) -> dict:
-    """Asked by the interviewer who just finished their own feedback items,
-    right before handing off to the other interviewer for the rest —
-    see interview_loop.py's feedback-phase handover gate."""
-    prompt = f"Interview language: {language}"
-    result = generate_json(coach_handover_qna_system_instruction(persona, next_persona), prompt)
+def generate_feedback_item_followup(session: models.Session, item: dict, candidate_question: str, persona: dict) -> dict:
+    """Answers a candidate's follow-up question about ONE already-delivered
+    feedback item — see interview_loop.py's per-item follow-up-or-next
+    choice."""
+    prompt = (
+        f"Interview language: {session.language}\n"
+        f"Competency: {item.get('competency')}\n"
+        f"Feedback already given on this competency: {item}\n\n"
+        f"Candidate's follow-up question: {candidate_question}"
+    )
+    result = generate_json(coach_item_followup_system_instruction(persona), prompt)
+    if result.get("emotion_tag") not in VALID_EMOTIONS:
+        result["emotion_tag"] = "neutral"
+    return result
+
+
+def generate_feedback_closing(session: models.Session, persona: dict) -> dict:
+    """The sign-off spoken once the candidate clicks past the last feedback
+    item — see interview_loop.py's _close_feedback_session."""
+    result = generate_json(coach_session_closing_system_instruction(persona), f"Interview language: {session.language}")
     if result.get("emotion_tag") not in VALID_EMOTIONS:
         result["emotion_tag"] = "encouraging"
-    return result
-
-
-def generate_handover_qna_response(
-    session: models.Session, delivered_items: list[dict], candidate_reply: str, persona: dict, next_persona: dict
-) -> dict:
-    prompt = (
-        f"Interview language: {session.language}\n"
-        f"Feedback {persona['display_name']} already gave (items): {delivered_items}\n\n"
-        f"Candidate's reply to 'do you have any questions for me': {candidate_reply}"
-    )
-    result = generate_json(coach_handover_response_system_instruction(persona, next_persona), prompt)
-    if result.get("emotion_tag") not in VALID_EMOTIONS:
-        result["emotion_tag"] = "neutral"
-    return result
-
-
-def generate_coaching_qna_response(session: models.Session, coaching: dict, candidate_reply: str, persona: dict) -> dict:
-    prompt = (
-        f"Interview language: {session.language}\n"
-        f"Feedback already given (items): {coaching.get('items', [])}\n"
-        f"Overall summary already given: {coaching.get('overall_summary', '')}\n\n"
-        f"Candidate's reply to 'do you have any questions about this feedback': {candidate_reply}"
-    )
-    result = generate_json(coach_qna_response_system_instruction(persona), prompt)
-    if result.get("emotion_tag") not in VALID_EMOTIONS:
-        result["emotion_tag"] = "neutral"
     return result
