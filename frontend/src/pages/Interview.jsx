@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
+import { estimateSpeechDurationMs } from "../avatar/estimateSpeechDuration.js";
 import { MockAvatarController } from "../avatar/MockAvatarController.js";
 import { PerxonaAvatarController } from "../avatar/PerxonaAvatarController.js";
 import CameraPanel from "../components/CameraPanel.jsx";
@@ -43,6 +44,19 @@ export default function Interview() {
   const [geminiConnected, setGeminiConnected] = useState(false);
   const [perxonaConnectedMap, setPerxonaConnectedMap] = useState({}); // interviewer id -> connected
   const [transcript, setTranscript] = useState([]); // running {speaker, text}[] for the live chat panel
+  // The currently-speaking line, revealed progressively in step with
+  // estimated speech duration (see speakAndPushTranscript) — rendered as an
+  // extra trailing bubble after `transcript`, then folded into `transcript`
+  // itself once the line is fully spoken.
+  const [revealingEntry, setRevealingEntry] = useState(null);
+  const revealFrameRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (revealFrameRef.current) cancelAnimationFrame(revealFrameRef.current);
+    };
+  }, []);
+
   const [begun, setBegun] = useState(false); // gates the whole flow behind a real user click
   const [connecting, setConnecting] = useState(false);
 
@@ -84,37 +98,56 @@ export default function Interview() {
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [transcript]);
+  }, [transcript, revealingEntry]);
 
   const pushTranscript = useCallback((speaker, text) => {
     if (!text) return;
     setTranscript((t) => [...t, { speaker, text }]);
   }, []);
 
-  // Waiting for the full speak() to resolve before showing the chat bubble
-  // (the previous behavior) made the chat panel visibly lag behind the
-  // avatar on anything longer than a short line — reported live as the chat
-  // text taking "too much time to appear". Pushing it the instant speak()
-  // is called would show it before the avatar has said anything at all, so
-  // instead: push shortly after the avatar starts talking (a fixed delay,
-  // not tied to the SDK's own start-of-speech event — confirmed unreliably
-  // slow, up to ~10s, in PerxonaAvatarController's history), or the moment
-  // it actually finishes if that happens first (e.g. a very short line).
-  const EARLY_TRANSCRIPT_DELAY_MS = 900;
+  // Two failed approaches before this one, both reported live: pushing the
+  // full line only once speak() resolved made the chat panel visibly lag
+  // behind the avatar on anything longer than a short sentence ("text takes
+  // too long to appear"). Pushing the whole block ~900ms after speech
+  // started fixed that but overcorrected — a long line's entire paragraph
+  // would appear almost immediately while the avatar was still only a few
+  // words into actually saying it, so the candidate could read the whole
+  // answer while the avatar visibly "caught up" to text already on screen.
+  //
+  // This reveals the line progressively, character by character, over the
+  // same estimated-duration math PerxonaAvatarController already uses for
+  // its own audio-completion floor (see estimateSpeechDuration.js) — like
+  // live captioning, not a pre-generated block. Snapped to 100% the instant
+  // speak() actually resolves, so it never lags behind real completion even
+  // if the estimate runs long or short.
   const speakAndPushTranscript = useCallback(
     async (controller, speaker, text, emo) => {
-      let pushed = false;
-      const pushOnce = () => {
-        if (pushed) return;
-        pushed = true;
-        pushTranscript(speaker, text);
+      if (!text) {
+        await controller.speak(text, emo);
+        return;
+      }
+      const durationMs = estimateSpeechDurationMs(text, session?.language || "en");
+      const startedAt = performance.now();
+      let done = false;
+      setRevealingEntry({ speaker, text: "" });
+
+      const tick = (now) => {
+        if (done) return;
+        const revealedChars = Math.min(text.length, Math.floor((text.length * (now - startedAt)) / durationMs));
+        setRevealingEntry({ speaker, text: text.slice(0, revealedChars) });
+        if (revealedChars < text.length) {
+          revealFrameRef.current = requestAnimationFrame(tick);
+        }
       };
-      const timer = setTimeout(pushOnce, EARLY_TRANSCRIPT_DELAY_MS);
+      revealFrameRef.current = requestAnimationFrame(tick);
+
       await controller.speak(text, emo);
-      clearTimeout(timer);
-      pushOnce();
+      done = true;
+      if (revealFrameRef.current) cancelAnimationFrame(revealFrameRef.current);
+      setRevealingEntry(null);
+      pushTranscript(speaker, text);
     },
-    [pushTranscript]
+    [pushTranscript, session]
   );
 
   const [micUnsupported, setMicUnsupported] = useState(false);
@@ -590,7 +623,9 @@ export default function Interview() {
         <div className="interview-chat-column" style={columnHeight ? { height: `${columnHeight}px` } : undefined}>
           <div className="interview-chat">
             <div className="interview-chat__list">
-              {transcript.length === 0 && <p className="interview-chat__empty">The conversation will appear here.</p>}
+              {transcript.length === 0 && !revealingEntry && (
+                <p className="interview-chat__empty">The conversation will appear here.</p>
+              )}
               {transcript.map((entry, i) => (
                 <div key={i} className={`interview-chat__bubble interview-chat__bubble--${entry.speaker}`}>
                   <span className="interview-chat__speaker">
@@ -601,6 +636,17 @@ export default function Interview() {
                   <p>{entry.text}</p>
                 </div>
               ))}
+              {revealingEntry && (
+                <div
+                  className={`interview-chat__bubble interview-chat__bubble--${revealingEntry.speaker} interview-chat__bubble--revealing`}
+                >
+                  <span className="interview-chat__speaker">{INTERVIEWER_NAMES[revealingEntry.speaker] || revealingEntry.speaker}</span>
+                  <p>
+                    {revealingEntry.text}
+                    <span className="interview-chat__cursor" aria-hidden="true" />
+                  </p>
+                </div>
+              )}
               <div ref={transcriptEndRef} />
             </div>
           </div>
@@ -641,7 +687,7 @@ export default function Interview() {
                   : "Type your answer, or use the mic button"
               }
               rows={2}
-              disabled={submitting}
+              disabled={submitting || speaking}
             />
             <button
               type="button"
@@ -663,7 +709,7 @@ export default function Interview() {
                 Next feedback
               </button>
             )}
-            <button type="submit" disabled={submitting || !answerDraft.trim()}>
+            <button type="submit" disabled={submitting || speaking || !answerDraft.trim()}>
               {turnKind === "feedback_item" ? "Ask" : "Send answer"}
             </button>
           </form>

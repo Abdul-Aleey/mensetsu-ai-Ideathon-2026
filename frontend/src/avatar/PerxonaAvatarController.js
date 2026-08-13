@@ -23,6 +23,7 @@
  * Reference: https://github.com/XRSPACE-Inc/perxona-connect-kit
  */
 import { startBrowserSpeechRecognition, stopBrowserSpeechRecognition } from "./browserSpeechRecognition.js";
+import { estimateSpeechDurationMs } from "./estimateSpeechDuration.js";
 
 // Maps our own interviewer's emotion_tag (see backend/app/prompts/interviewer.py)
 // onto real motion IDs from this avatar's own catalog (GET
@@ -271,23 +272,13 @@ export class PerxonaAvatarController {
     });
   }
 
-  // ~170 words/minute plus a small lead-in pad — deliberately not padded
-  // much further, since this only needs to outlast PERFORMANCE_END's
-  // known failure mode (resolving after the first segment of long text),
-  // not stand in for it on ordinary turns.
-  //
-  // Word-splitting on whitespace only works for English — Japanese text has
-  // no spaces between words at all, so `text.split(/\s+/)` on a Japanese
-  // sentence returns the whole thing as a single "word" no matter how long
-  // it actually is, making the floor near-meaningless (~1.1s regardless of
-  // sentence length) for exactly the bilingual sessions this product
-  // supports. Count characters instead for Japanese, at a rate appropriate
-  // for the interview prompts' own "measured, formal" business register
-  // (slower than casual speech).
+  // Deliberately not padded much further than the shared estimate, since
+  // this only needs to outlast PERFORMANCE_END's known failure mode
+  // (resolving after the first segment of long text), not stand in for it
+  // on ordinary turns. See estimateSpeechDuration.js — shared with the chat
+  // transcript's progressive reveal timing so both use the same numbers.
   _estimatedSpeechMs(text) {
-    return this.language === "ja"
-      ? 800 + (text.replace(/\s+/g, "").length / 6) * 1000 // ~6 characters/sec
-      : 800 + (text.trim().split(/\s+/).filter(Boolean).length / 170) * 60 * 1000; // ~170 words/min
+    return estimateSpeechDurationMs(text, this.language);
   }
 
   async startListening() {

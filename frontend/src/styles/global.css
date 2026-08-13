@@ -902,6 +902,34 @@ button[type="submit"]:disabled {
   line-height: 1.5;
 }
 
+/* The line currently being spoken — text reveals progressively (see
+   Interview.jsx's speakAndPushTranscript), this cursor is the only visual
+   cue that the bubble is still "live" rather than a finished message. */
+.interview-chat__bubble--revealing {
+  opacity: 0.92;
+}
+
+.interview-chat__cursor {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: interview-chat-cursor-blink 0.9s step-end infinite;
+}
+
+@keyframes interview-chat-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
 .avatar-panel,
 .camera-panel {
   background: var(--paper-raised);
