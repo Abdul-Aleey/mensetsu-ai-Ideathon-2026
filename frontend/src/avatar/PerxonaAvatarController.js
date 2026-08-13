@@ -75,6 +75,7 @@ export class PerxonaAvatarController {
     this._recognition = null;
     this._config = null;
     this._preloadPromise = null;
+    this._onVisibilityChange = null;
   }
 
   onConnectionChange(callback) {
@@ -162,6 +163,24 @@ export class PerxonaAvatarController {
     // (confirmed live: a second resumeAudioPlayback() call here is what
     // made present() start succeeding).
     await this.presenter.resumeAudioPlayback?.();
+
+    // A fully minimized window (not just an inactive tab) stops
+    // requestAnimationFrame entirely — there's nothing to paint. Reported
+    // live: the avatar's audio cut out while minimized and stayed silent
+    // even after un-minimizing, for the rest of the session. Plain
+    // <audio>/<video> keep playing regardless of rendering, but this SDK is
+    // a live-rendered, lip-synced 3D avatar; if its audio scheduling is
+    // coupled to that render loop (typical for lip-sync), losing rAF loses
+    // audio with it. Nudging resumeAudioPlayback() when the page becomes
+    // visible again can't recover the line that was already cut short, but
+    // it's the one lever this SDK exposes to stop every turn *after* that
+    // from staying silently broken too.
+    this._onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        this.presenter?.resumeAudioPlayback?.();
+      }
+    };
+    document.addEventListener("visibilitychange", this._onVisibilityChange);
 
     await new Promise((resolve) => {
       if (this.connected) {
@@ -299,6 +318,10 @@ export class PerxonaAvatarController {
 
   stop() {
     this.stopListening();
+    if (this._onVisibilityChange) {
+      document.removeEventListener("visibilitychange", this._onVisibilityChange);
+      this._onVisibilityChange = null;
+    }
     this.presenter?.interruptPresentation?.();
     this.presenter?.remove();
     this.presenter = null;
