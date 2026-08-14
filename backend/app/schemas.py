@@ -25,6 +25,7 @@ class SessionOut(BaseModel):
     phase: str
     question_rounds: int
     questions_asked: int
+    primary_questions_asked: int
     current_competency_index: int
     competencies: list[CompetencyOut]
 

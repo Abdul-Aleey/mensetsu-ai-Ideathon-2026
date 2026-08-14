@@ -230,7 +230,7 @@ export class PerxonaAvatarController {
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
 
-  async speak(text, emotion, { bow = false } = {}) {
+  async speak(text, emotion, { bow = false, onAccepted } = {}) {
     if (!this.presenter) return;
     const taggedText = withMotionMarkup(text, emotion, this.interviewerId, bow);
     let result = await this.presenter.present(taggedText);
@@ -248,6 +248,14 @@ export class PerxonaAvatarController {
       console.error("Perxona present() failed:", result.code, result.message);
       return result;
     }
+    // Fires once the request is genuinely accepted (~2-3s in), the closest
+    // signal available to "the avatar is actually about to talk." The chat
+    // transcript's progressive reveal (see Interview.jsx) uses this instead
+    // of starting its own clock the instant speak() was called — without
+    // it, the reveal ran during this entire acceptance window before any
+    // audio existed, showing the message well before the avatar had
+    // started, reported live as "chat message appears before it's loaded."
+    onAccepted?.();
     // present() resolves in ~2-3s, right after the request is accepted —
     // nowhere near when the avatar actually finishes speaking. PERFORMANCE_END
     // is the fast, single-event "done talking" signal (confirmed live,

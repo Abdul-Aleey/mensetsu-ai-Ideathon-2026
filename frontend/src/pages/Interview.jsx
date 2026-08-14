@@ -17,6 +17,32 @@ const EMOTION_LABEL = {
 // display names, which is all the chat panel / slot labels need.
 const INTERVIEWER_NAMES = { alex: "Alex", sara: "Sara" };
 
+// Plain fetch() never times out on its own — if the backend hangs (a
+// stalled Gemini call, previously with no timeout of its own either; see
+// gemini_client.py's _REQUEST_TIMEOUT_MS), the candidate is left staring at
+// a frozen "thinking" animation forever, no error, no way to retry.
+// Reported live as exactly that: an answer produced no response at all,
+// spoken or written, session never recovered. This is the frontend's own
+// backstop — generous enough (100s) to not cut off a legitimately slow but
+// still-succeeding backend retry cycle, short enough to eventually hand the
+// candidate back a real error and a retry button instead of silence.
+const ANSWER_FETCH_TIMEOUT_MS = 100_000;
+
+async function fetchWithTimeout(url, options, timeoutMs = ANSWER_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error("This is taking much longer than expected. Please try again.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export default function Interview() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -105,21 +131,27 @@ export default function Interview() {
     setTranscript((t) => [...t, { speaker, text }]);
   }, []);
 
-  // Two failed approaches before this one, both reported live: pushing the
-  // full line only once speak() resolved made the chat panel visibly lag
-  // behind the avatar on anything longer than a short sentence ("text takes
-  // too long to appear"). Pushing the whole block ~900ms after speech
-  // started fixed that but overcorrected — a long line's entire paragraph
-  // would appear almost immediately while the avatar was still only a few
-  // words into actually saying it, so the candidate could read the whole
-  // answer while the avatar visibly "caught up" to text already on screen.
+  // Three approaches, in order, all reported live: pushing the full line
+  // only once speak() resolved made the chat panel visibly lag behind the
+  // avatar on anything longer than a short sentence ("text takes too long
+  // to appear"). Pushing the whole block ~900ms after speak() was CALLED
+  // fixed that but overcorrected in a different way — the reveal clock
+  // started before the avatar had actually begun talking at all (Perxona's
+  // present() takes ~2-3s just to be accepted, well before any real audio
+  // exists), so the message was visibly appearing during a window where
+  // nothing had started yet — "chat message appears before it's loaded."
   //
-  // This reveals the line progressively, character by character, over the
-  // same estimated-duration math PerxonaAvatarController already uses for
-  // its own audio-completion floor (see estimateSpeechDuration.js) — like
-  // live captioning, not a pre-generated block. Snapped to 100% the instant
-  // speak() actually resolves, so it never lags behind real completion even
-  // if the estimate runs long or short.
+  // This waits for a genuine "speech is actually starting" signal from the
+  // controller (onAccepted — Perxona's request-accepted event, or the
+  // browser's real onstart event in mock mode) before starting the reveal
+  // clock at all, then reveals character by character over the same
+  // estimated-duration math PerxonaAvatarController already uses for its
+  // own audio-completion floor (see estimateSpeechDuration.js) — like live
+  // captioning, not a pre-generated block. Snapped to 100% the instant
+  // speak() actually resolves, so it never lags behind real completion
+  // either. If onAccepted never fires for some reason, the line still
+  // appears in full the moment speak() resolves — same safe fallback as
+  // the original "wait for completion" behavior, never a regression.
   const speakAndPushTranscript = useCallback(
     async (controller, speaker, text, emo, options) => {
       if (!text) {
@@ -127,21 +159,25 @@ export default function Interview() {
         return;
       }
       const durationMs = estimateSpeechDurationMs(text, session?.language || "en");
-      const startedAt = performance.now();
       let done = false;
-      setRevealingEntry({ speaker, text: "" });
+      let startedAt = null;
 
       const tick = (now) => {
-        if (done) return;
+        if (done || startedAt == null) return;
         const revealedChars = Math.min(text.length, Math.floor((text.length * (now - startedAt)) / durationMs));
         setRevealingEntry({ speaker, text: text.slice(0, revealedChars) });
         if (revealedChars < text.length) {
           revealFrameRef.current = requestAnimationFrame(tick);
         }
       };
-      revealFrameRef.current = requestAnimationFrame(tick);
+      const onAccepted = () => {
+        if (done || startedAt != null) return;
+        startedAt = performance.now();
+        setRevealingEntry({ speaker, text: "" });
+        revealFrameRef.current = requestAnimationFrame(tick);
+      };
 
-      await controller.speak(text, emo, options);
+      await controller.speak(text, emo, { ...options, onAccepted });
       done = true;
       if (revealFrameRef.current) cancelAnimationFrame(revealFrameRef.current);
       setRevealingEntry(null);
@@ -223,7 +259,7 @@ export default function Interview() {
       setThinking(true);
 
       try {
-        const res = await fetch(`/api/sessions/${sessionId}/answer`, {
+        const res = await fetchWithTimeout(`/api/sessions/${sessionId}/answer`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ answer: text }),
@@ -288,7 +324,7 @@ export default function Interview() {
     setThinking(true);
 
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/answer`, {
+      const res = await fetchWithTimeout(`/api/sessions/${sessionId}/answer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answer: "" }),
@@ -434,7 +470,14 @@ export default function Interview() {
         // both cases.
       }
       if (pendingResumeRef.current) {
-        pendingResumeRef.current.questionsAsked = data.questions_asked;
+        // data.questions_asked here is the SESSION's total turn counter
+        // (intro turns, follow-ups, everything) — a completely different
+        // number from AnswerOut's questions_asked, which every other call
+        // site of setQuestionsAsked() uses and which is deliberately
+        // primary-questions-only so it stays bounded by questionRounds.
+        // Using the wrong one here only surfaced on reload, showing
+        // "Question 10 of 3" once total turns outgrew the actual budget.
+        pendingResumeRef.current.questionsAsked = data.primary_questions_asked;
       }
 
       // One controller per interviewer in this session — both get created
@@ -498,7 +541,7 @@ export default function Interview() {
     // generates. The backend's null-answer handling already replays
     // whatever's actually pending (including the right turn_kind) rather
     // than always asking something brand new.
-    const openingPromise = fetch(`/api/sessions/${sessionId}/answer`, {
+    const openingPromise = fetchWithTimeout(`/api/sessions/${sessionId}/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ answer: null }),

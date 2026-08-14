@@ -18,7 +18,7 @@ export class MockAvatarController {
     // Nothing to connect to — this is the whole point of mock mode.
   }
 
-  speak(text, _emotion) {
+  speak(text, _emotion, { onAccepted } = {}) {
     return new Promise((resolve) => {
       if (!("speechSynthesis" in window)) {
         resolve();
@@ -28,6 +28,12 @@ export class MockAvatarController {
       utterance.lang = this.language === "ja" ? "ja-JP" : "en-US";
       const voice = _pickVoice(utterance.lang);
       if (voice) utterance.voice = voice;
+      // Real browser event, fires exactly when speech audibly starts —
+      // even more precise than Perxona's "request accepted" signal. See
+      // PerxonaAvatarController.speak() for why the chat transcript's
+      // reveal animation needs this instead of starting the instant
+      // speak() was called.
+      utterance.onstart = () => onAccepted?.();
       utterance.onend = () => resolve();
       utterance.onerror = () => resolve();
       window.speechSynthesis.cancel(); // don't let utterances queue up across turns

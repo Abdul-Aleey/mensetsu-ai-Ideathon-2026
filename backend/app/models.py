@@ -33,7 +33,7 @@ class Session(Base):
     # Updated every time a turn is created — lets closing/feedback-qna turns
     # continue from whoever spoke last instead of needing to re-derive it.
     last_speaker: Mapped[str] = mapped_column(String, default="alex")
-    question_rounds: Mapped[int] = mapped_column(Integer, default=10)  # candidate-facing budget: 5 | 10 | 15 | 20
+    question_rounds: Mapped[int] = mapped_column(Integer, default=10)  # candidate-facing budget: 1 | 2 | 3 | 5 | 10 | 15 | 20
     primary_questions_asked: Mapped[int] = mapped_column(Integer, default=0)  # counts toward question_rounds
     questions_asked: Mapped[int] = mapped_column(Integer, default=0)  # total turns incl. follow-ups, for indexing
     phase: Mapped[str] = mapped_column(String, default="intro")  # intro | competencies | closing | feedback | complete

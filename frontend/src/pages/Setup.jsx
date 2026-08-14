@@ -348,7 +348,7 @@ export default function Setup() {
             <div className="field">
               <span>Number of questions</span>
               <div className="rounds-picker">
-                {[3, 5, 10, 15, 20].map((n) => (
+                {[1, 2, 3, 5, 10, 15, 20].map((n) => (
                   <button
                     key={n}
                     type="button"

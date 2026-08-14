@@ -18,7 +18,7 @@ from ..services.storage import load_report_pdf, save_report_pdf
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
-VALID_QUESTION_ROUNDS = {3, 5, 10, 15, 20}
+VALID_QUESTION_ROUNDS = {1, 2, 3, 5, 10, 15, 20}
 VALID_MODES = {"hiring", "practice"}
 
 
@@ -49,7 +49,7 @@ async def create_session(
     db: DBSession = Depends(get_db),
 ):
     if question_rounds not in VALID_QUESTION_ROUNDS:
-        raise HTTPException(status_code=400, detail="question_rounds must be one of 3, 5, 10, 15, 20.")
+        raise HTTPException(status_code=400, detail="question_rounds must be one of 1, 2, 3, 5, 10, 15, 20.")
     if mode not in VALID_MODES:
         raise HTTPException(status_code=400, detail="mode must be one of hiring, practice.")
     interviewer_ids = _parse_interviewers(interviewers)

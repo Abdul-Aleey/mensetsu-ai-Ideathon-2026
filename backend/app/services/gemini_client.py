@@ -32,6 +32,18 @@ _MAX_ATTEMPTS = 3
 # here — that one genuinely is worth retrying.
 _NON_RETRYABLE_CODES = {400, 401, 403, 404}
 
+# Per-attempt request timeout (ms). Without this, a stalled network
+# connection to Vertex AI just hangs — the SDK has no default timeout — and
+# every retry/non-retryable-error handling above is dead code, since none of
+# it runs until the call actually returns or raises. Reported live: a
+# candidate's answer produced no response at all, spoken or written, and the
+# session never recovered — the frontend's own fetch() has no timeout
+# either, so a hung backend call left it waiting forever with no error to
+# show and no way to retry. 30s comfortably covers the slowest real calls
+# (the Coach's full-transcript pass) while still bounding a genuine hang to
+# a recoverable few tens of seconds instead of forever.
+_REQUEST_TIMEOUT_MS = 30_000
+
 
 @lru_cache
 def _client() -> genai.Client:
@@ -73,6 +85,7 @@ def generate_json(system_instruction: str, prompt: str) -> dict:
                     system_instruction=system_instruction,
                     response_mime_type="application/json",
                     temperature=0.4,
+                    http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
                 ),
             )
             return json.loads(response.text)
