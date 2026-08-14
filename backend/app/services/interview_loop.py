@@ -116,7 +116,7 @@ def advance_interview(db: DBSession, session: models.Session, answer: str | None
     session.status = "complete"
     session.phase = "complete"
     db.commit()
-    return {"status": "complete", "questions_asked": session.questions_asked}
+    return {"status": "complete", "questions_asked": session.primary_questions_asked}
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +341,7 @@ def _handle_closing(db, session, answer):
     db.commit()
     return {
         "status": "complete",
-        "questions_asked": session.questions_asked,
+        "questions_asked": session.primary_questions_asked,
         "closing_message": closing["response_text"],
         "speaker": speaker,
         "emotion": closing["emotion_tag"],
@@ -412,7 +412,7 @@ def _close_feedback_session(db, session):
     db.commit()
     return {
         "status": "complete",
-        "questions_asked": session.questions_asked,
+        "questions_asked": session.primary_questions_asked,
         "closing_message": closing["response_text"],
         "speaker": speaker,
         "emotion": closing["emotion_tag"],

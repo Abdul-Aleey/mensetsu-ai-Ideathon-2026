@@ -1,4 +1,8 @@
-# Mensetsu AI (面接) — AI Interview Screening That Can Actually Tell Candidates Apart
+# Mensetsu AI — Adaptive AI Interviews for Smarter Hiring & Candidate Coaching
+
+<p align="center">
+  <img src="Images/Lanfing%20Page.jpg" alt="Mensetsu AI landing page" width="100%" />
+</p>
 
 ## The Problem
 
@@ -20,7 +24,13 @@ The same engine runs two products from one build:
 - **B2B — hiring mode**, ending in a scored, evidence-backed recommendation for a recruiter, for teams doing first-round screening at volume who need a signal AI-polished résumés can't fake.
 - **B2C — practice mode**, ending in personalized spoken coaching for the candidate — a rehearsal against a real adaptive interviewer instead of a static question bank, closing with concrete feedback rather than generic advice.
 
+<p align="center">
+  <img src="Images/Business_types.jpg" alt="Two products from one engine: Schedule a real interview for hiring teams, Practice an interview for candidates" width="100%" />
+</p>
+
 This isn't a hopeful architecture claim: `interview_loop.py`, `planner.py`, and `interviewer.py` contain zero role-based branching. `session.mode` (`hiring` | `practice`) only changes what happens *after* the identical adaptive interview finishes — a scored report, or a spoken coaching walkthrough. There's no B2B-only code to rip out to serve a candidate directly; it's one engine serving both sides of the same hiring relationship. Hiring the right person — or getting ready to be hired — is the goal. The résumé reality-check is how Mensetsu AI gets there, not the pitch itself.
+
+**Why this isn't just a chatbot bolted onto hiring.** Existing AI interview tools are largely either async video-response reviewers (record yourself answering a fixed list, someone reviews it later) or static chat-based question banks. Neither actually interviews: neither probes a weak answer, challenges a résumé mismatch in real time, or adapts the next question based on what was just said. The adaptive Router plus the silent Assessor, running together on every single turn, is what makes this a live interview instead of a survey with an AI-generated intro.
 
 ## The Prototype
 
@@ -39,11 +49,23 @@ Gemini plans competencies      through after the last question         report + 
 ```
 
 <p align="center">
-  <img src="docs/screenshots/setup-screen.jpg" alt="Mensetsu AI Setup screen" width="49%" />
-  <img src="docs/screenshots/live-interview.jpg" alt="Live 3D interview avatar, mid-question" width="49%" />
+  <img src="Images/How%20it%20works.jpg" alt="How it works: Upload, Plan, Interview, Result" width="100%" />
 </p>
 
-The single most differentiating moment to see live: the interviewer visibly **probing** a vague answer or **challenging** a résumé claim mid-interview — not a canned reaction, a decision made fresh against the full conversation so far. See ["The report"](#the-report) below for what that produces once the interview ends, with a real example transcript.
+<p align="center">
+  <img src="Images/Schedule%20Interview.jpg" alt="Setup screen, hiring mode" width="49%" />
+  <img src="Images/Practice%20Interview.jpg" alt="Setup screen, practice mode" width="49%" />
+</p>
+
+<p align="center">
+  <img src="Images/Image%20Interview.jpg" alt="Live interview with both Alex and Sara, chat transcript alongside" width="100%" />
+</p>
+
+The single most differentiating moment to see live: the interviewer visibly **probing** a vague answer or **challenging** a résumé claim mid-interview — not a canned reaction, a decision made fresh against the full conversation so far. See ["The report"](#the-report) below for what that produces once the interview ends, with real example transcripts.
+
+<p align="center">
+  <img src="Images/Report%20Image.jpg" alt="Finished report: recommendation and competency scorecard" width="100%" />
+</p>
 
 ## The Impact
 
@@ -68,7 +90,7 @@ Five distinct Gemini roles run this product, each with its own dedicated system 
 
 1. **Planner.** The job description and résumé are turned into 4–5 tailored competencies, each with the specific résumé claim to probe.
 2. **Intro (fixed, bounded turns).** The interviewer(s) introduce themselves and the role, ask the candidate to introduce themselves, then ask up to two natural follow-ups grounded in what they actually said. In a two-interviewer session, the first hands off to the second before the candidate is asked to speak.
-3. **Adaptive competency loop (bounded by the candidate's chosen question count: 3/5/10/15/20).** After every answer, an LLM router chooses exactly one move:
+3. **Adaptive competency loop (bounded by the candidate's chosen question count: 1/2/3/5/10/15/20).** After every answer, an LLM router chooses exactly one move:
    - `advance` — the answer was specific and complete.
    - `probe` — vague or buzzwordy; ask for a concrete example.
    - `challenge` — the answer is thinner than, or contradicts, the résumé's claim for this competency.
@@ -113,7 +135,16 @@ The interview isn't the product. The decision it supports is — a scored recomm
 - **A model example answer** for each question — STAR structure for general competencies, Problem/Approach/Tradeoffs/Outcome for technical ones.
 - **Overall strengths, areas to improve, and practice recommendations** for the candidate's next session or real interview.
 
-**[See a real hiring report →](docs/sample-report.pdf)**, an actual session, not a mockup. The candidate's résumé claimed she led a monolith-to-microservices migration and designed a Kafka event bus. Asked to walk through it, her real answer was *"Well we did it in team so I am not at all aware."* Pushed on her individual contribution, it narrowed to SAP data extraction. Asked about a Redis caching strategy she'd listed: *"I dont remember much regarding it."* Asked to name the async libraries behind a claimed 300% performance gain: *"I dont remember."* The adaptive router pressed the same claim across five separate turns before moving on. This is what "probe the résumé" actually looks like in a real transcript. Recommendation: **Do not advance**, with every line of justification traceable back to one of those exact answers.
+**Real sessions, not mockups — click through:**
+
+| Report | Role | Outcome |
+|---|---|---|
+| [Sample1_Interview.pdf](Sample%20reports/Sample1_Interview.pdf) | Data Analyst — Priya Nair | Do not advance. Résumé vs. interview reality check catches her claiming 5 years of experience live, against 3 on the résumé. |
+| [Sample1Coaching.pdf](Sample%20reports/Sample1Coaching.pdf) | Data Analyst — Priya Nair, practice mode | The same candidate's practice session on the same role — what the coaching output looks like end to end. |
+| [Sample2_Interview.pdf](Sample%20reports/Sample2_Interview.pdf) | Backend Software Engineer — Emma Carter | Do not advance. A different role entirely, showing the Planner and Router generalize past the Data Analyst example above. |
+| [Sample3Interview.pdf](Sample%20reports/Sample3Interview.pdf) | Data Analyst — Priya Nair, separate session | A mixed scorecard, not a uniform fail — Weak on SQL depth, but Adequate on stakeholder communication, showing the Assessor rates each competency on its own evidence rather than defaulting to one verdict. |
+
+Also on file: an [earlier full example](docs/sample-report.pdf) with a five-turn résumé challenge (a monolith-to-microservices migration and a Kafka event bus, both unsubstantiated under follow-up).
 
 ## Tech stack
 

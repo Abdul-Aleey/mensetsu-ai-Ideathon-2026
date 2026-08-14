@@ -66,6 +66,16 @@ async def create_session(
         raise HTTPException(status_code=400, detail="Could not extract any text from the résumé file.")
 
     plan = plan_interview(jd_text, resume_text, recruiter_prompt, language)
+    # The planner always proposes min_competencies..max_competencies items
+    # (settings.py), with no idea of the candidate-facing question budget
+    # the recruiter picked at Setup. The shown/stored plan should track the
+    # session's actual shape: question_rounds primary questions, plus the
+    # fixed opening and closing turns that bookend every interview (see
+    # interview_loop.py's phase docstring — intro and closing never count
+    # against question_rounds, but they're still real parts of the
+    # conversation) — hence +2. Still capped by however many the planner
+    # actually generated; this never invents competencies that don't exist.
+    planned_competencies = (plan.get("competencies") or [])[: max(1, question_rounds + 2)]
 
     session = models.Session(
         role_title=plan.get("role_title"),
@@ -85,7 +95,7 @@ async def create_session(
     db.add(session)
     db.flush()
 
-    for order_index, c in enumerate(plan.get("competencies", [])):
+    for order_index, c in enumerate(planned_competencies):
         db.add(
             models.Competency(
                 session_id=session.id,
@@ -114,6 +124,7 @@ def create_demo_session(background_tasks: BackgroundTasks, db: DBSession = Depen
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     plan = plan_interview(jd_text, resume_text, None, None)
+    planned_competencies = (plan.get("competencies") or [])[:5]  # question_rounds=3 below, +2 for opening/closing
 
     session = models.Session(
         role_title=plan.get("role_title"),
@@ -129,7 +140,7 @@ def create_demo_session(background_tasks: BackgroundTasks, db: DBSession = Depen
     db.add(session)
     db.flush()
 
-    for order_index, c in enumerate(plan.get("competencies", [])):
+    for order_index, c in enumerate(planned_competencies):
         db.add(
             models.Competency(
                 session_id=session.id,
