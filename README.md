@@ -135,7 +135,7 @@ The interview isn't the product. The decision it supports is — a scored recomm
 - **A model example answer** for each question — STAR structure for general competencies, Problem/Approach/Tradeoffs/Outcome for technical ones.
 - **Overall strengths, areas to improve, and practice recommendations** for the candidate's next session or real interview.
 
-**Real sessions, not mockups — click through:**
+**Real sessions, not mockups.** Click through:
 
 | Report | Role | Outcome |
 |---|---|---|
