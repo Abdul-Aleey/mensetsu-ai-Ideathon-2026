@@ -121,9 +121,9 @@ export default function Interview() {
   // speak() actually resolves, so it never lags behind real completion even
   // if the estimate runs long or short.
   const speakAndPushTranscript = useCallback(
-    async (controller, speaker, text, emo) => {
+    async (controller, speaker, text, emo, options) => {
       if (!text) {
-        await controller.speak(text, emo);
+        await controller.speak(text, emo, options);
         return;
       }
       const durationMs = estimateSpeechDurationMs(text, session?.language || "en");
@@ -141,7 +141,7 @@ export default function Interview() {
       };
       revealFrameRef.current = requestAnimationFrame(tick);
 
-      await controller.speak(text, emo);
+      await controller.speak(text, emo, options);
       done = true;
       if (revealFrameRef.current) cancelAnimationFrame(revealFrameRef.current);
       setRevealingEntry(null);
@@ -153,14 +153,14 @@ export default function Interview() {
   const [micUnsupported, setMicUnsupported] = useState(false);
 
   const speakAndListen = useCallback(
-    async (text, emo, kind = "question", speaker = "alex") => {
+    async (text, emo, kind = "question", speaker = "alex", options) => {
       setCurrentSpeaker(speaker);
       currentSpeakerRef.current = speaker;
       setQuestion(text);
       setEmotion(emo);
       setTurnKind(kind);
       setSpeaking(true);
-      await speakAndPushTranscript(controllersRef.current[speaker], speaker, text, emo);
+      await speakAndPushTranscript(controllersRef.current[speaker], speaker, text, emo, options);
       setSpeaking(false);
       if (kind === "handoff") {
         // Nothing for the candidate to say — the first interviewer in a
@@ -244,7 +244,9 @@ export default function Interview() {
             setQuestion(data.closing_message);
             setEmotion(data.emotion || "neutral");
             setSpeaking(true);
-            await speakAndPushTranscript(controllersRef.current[closer], closer, data.closing_message, data.emotion || "neutral");
+            await speakAndPushTranscript(controllersRef.current[closer], closer, data.closing_message, data.emotion || "neutral", {
+              bow: true,
+            });
             setSpeaking(false);
           }
           navigate(`/complete/${sessionId}`);
@@ -305,7 +307,9 @@ export default function Interview() {
           setQuestion(data.closing_message);
           setEmotion(data.emotion || "neutral");
           setSpeaking(true);
-          await speakAndPushTranscript(controllersRef.current[closer], closer, data.closing_message, data.emotion || "neutral");
+          await speakAndPushTranscript(controllersRef.current[closer], closer, data.closing_message, data.emotion || "neutral", {
+            bow: true,
+          });
           setSpeaking(false);
         }
         navigate(`/complete/${sessionId}`);
@@ -504,7 +508,11 @@ export default function Interview() {
     const opening = await openingPromise;
     setConnecting(false);
     setQuestionsAsked(opening.questions_asked);
-    await speakAndListen(opening.question, opening.emotion, opening.turn_kind, opening.speaker);
+    // bow: true only here — this is the one moment guaranteed to be the
+    // actual first line of a fresh session, unlike the resume branch above
+    // (pending.question), which could be re-speaking any turn after a
+    // reload, not necessarily the opening greeting.
+    await speakAndListen(opening.question, opening.emotion, opening.turn_kind, opening.speaker, { bow: true });
   }, [sessionId, speakAndListen]);
 
   const competencyCount = session?.competencies?.length ?? 0;

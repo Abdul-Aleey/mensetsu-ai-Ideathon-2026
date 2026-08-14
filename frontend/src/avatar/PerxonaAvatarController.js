@@ -26,23 +26,45 @@ import { startBrowserSpeechRecognition, stopBrowserSpeechRecognition } from "./b
 import { estimateSpeechDurationMs } from "./estimateSpeechDuration.js";
 
 // Maps our own interviewer's emotion_tag (see backend/app/prompts/interviewer.py)
-// onto real motion IDs from this avatar's own catalog (GET
+// onto real motion IDs from each avatar's OWN catalog (GET
 // /api/v1/connect/assets/avatars/{id}/motions), embedded via Perxona's
-// Motion Markup syntax `[MOTION motion_id:priority]` — confirmed live
-// against this exact avatar. Chosen conservatively to match the "measured,
-// formal, respectful" Japanese business register already baked into the
-// interview prompts — no big/effusive gestures. "neutral" intentionally has
-// no mapping: per the SDK's own priority hierarchy, Talking already plays
-// automatically during present(), so tagging every single line would be
-// noisy and repetitive rather than purposeful.
+// Motion Markup syntax `[MOTION motion_id:priority]`. Motion catalogs are
+// per-avatar/per-skeleton, not shared — confirmed live by fetching both
+// catalogs directly: a single shared map here (the previous version) used
+// Alex's IDs unconditionally for both interviewers, and none of them exist
+// in Sara's catalog at all, so she's never actually played a gesture.
+// Chosen conservatively to match the "measured, formal, respectful"
+// Japanese business register already baked into the interview prompts — no
+// big/effusive gestures. "neutral" intentionally has no mapping: per the
+// SDK's own priority hierarchy, Talking already plays automatically during
+// present(), so tagging every single line would be noisy and repetitive
+// rather than purposeful.
 const EMOTION_MOTION_IDS = {
-  encouraging: "01KZAHAF8ZNKD3NQHZAXBZTK4Y", // "Casual Chest Gesture" — open, inviting
-  approving: "01K4M9NC4JRX44R08XP2YH2AC3", // "Male Thumbup Stand" — brief, sincere acknowledgment
-  probing: "01KZAH87A457ASGBQKND4ZMN0P", // "Right Hand Pointing Gesture" — a focused, direct beat
+  alex: {
+    encouraging: "01KZAHAF8ZNKD3NQHZAXBZTK4Y", // "Casual Chest Gesture" — open, inviting
+    approving: "01K4M9NC4JRX44R08XP2YH2AC3", // "Male Thumbup Stand" — brief, sincere acknowledgment
+    probing: "01KZAH87A457ASGBQKND4ZMN0P", // "Right Hand Pointing Gesture" — a focused, direct beat
+  },
+  sara: {
+    encouraging: "01KZD89ZZGFDVB8CYB7ZWBV1HF", // "Casual Chest Gesture" (Sara's own catalog ID)
+    approving: "01K4M9AQJEPKVX3HDKWWY4BH43", // "Female Thumbup Stand"
+    probing: "01KZD8E8P8F0BV6QABJVQV8Y86", // "Right Hand Pointing Gesture" (Sara's own catalog ID)
+  },
 };
 
-function withMotionMarkup(text, emotion) {
-  const motionId = EMOTION_MOTION_IDS[emotion];
+// A formal bow fits this product's whole Japanese-business-register premise
+// directly — used for the greeting (the very first line a fresh session
+// speaks) and the goodbye (the closing message), the two moments a real
+// interview actually calls for one. Present in both avatars' catalogs but
+// unused until now. Takes priority over the emotion-based gesture above
+// for that one line rather than stacking two motion tags.
+const FORMAL_BOW_IDS = {
+  alex: "01KZAGZ506Y34YKVC9V65NQ0CG",
+  sara: "01KZD89FZHTMFERT1G1KZYY3GC",
+};
+
+function withMotionMarkup(text, emotion, interviewerId, bow) {
+  const motionId = bow ? FORMAL_BOW_IDS[interviewerId] : EMOTION_MOTION_IDS[interviewerId]?.[emotion];
   return motionId ? `[MOTION ${motionId}:1] ${text}` : text;
 }
 
@@ -208,9 +230,9 @@ export class PerxonaAvatarController {
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
 
-  async speak(text, emotion) {
+  async speak(text, emotion, { bow = false } = {}) {
     if (!this.presenter) return;
-    const taggedText = withMotionMarkup(text, emotion);
+    const taggedText = withMotionMarkup(text, emotion, this.interviewerId, bow);
     let result = await this.presenter.present(taggedText);
     // present() never rejects — it resolves with a PresentationResult whose
     // success is false on failure. Seen live: the presenter can briefly
